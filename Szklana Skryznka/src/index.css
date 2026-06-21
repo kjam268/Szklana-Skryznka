@@ -1,0 +1,43 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-gray-100 font-sans select-none overflow-hidden h-screen w-screen;
+  }
+}
+
+/* Custom Scrollbar styling for cyber-console grid layout */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-background;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-800 rounded-full border border-gray-700 hover:bg-accent;
+}
+
+/* Cyberpunk terminal style elements */
+.control-border {
+  @apply border border-gray-800 hover:border-cyan-500/40 transition-colors duration-200;
+}
+
+.terminal-header {
+  @apply text-xs uppercase tracking-widest font-mono text-gray-500;
+}
+
+/* Highlight glow elements */
+.cyan-glow {
+  box-shadow: 0 0 15px -3px rgba(6, 182, 212, 0.45);
+}
+
+.orange-glow {
+  box-shadow: 0 0 15px -3px rgba(249, 115, 22, 0.45);
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "szklana-skryznka",
+  "productName": "Szklana Skryznka",
   "version": "0.1.0",
   "identifier": "com.george.szklana-skryznka",
   "build": {
@@ -12,9 +12,10 @@
   "app": {
     "windows": [
       {
-        "title": "szklana-skryznka",
-        "width": 800,
-        "height": 600
+        "title": "Szklana Skryznka",
+        "width": 1024,
+        "height": 768,
+        "maximized": true
       }
     ],
     "security": {

@@ -1,50 +1,105 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import React, { useState, useEffect } from "react";
+import { Sidebar } from "./components/Sidebar";
+import { SplashScreen } from "./pages/SplashScreen";
+import { OnAir } from "./pages/OnAir";
+import { Library } from "./pages/Library";
+import { Grid } from "./pages/Grid";
+import { DatabaseViewer } from "./pages/Database";
+import { Health } from "./pages/Health";
+import { Suggestions } from "./pages/Suggestions";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [isBooted, setIsBooted] = useState(false);
+  const [activeTab, setActiveTab] = useState("onair");
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  useEffect(() => {
+    let unlistenKey: any;
+    let unlistenPurge: any;
+
+    const setupListeners = async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      
+      unlistenKey = await listen("menu-set-api-key", async () => {
+        const key = prompt("Enter TMDb API Key:");
+        if (key !== null) {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("set_setting", { key: "tmdb_api_key", value: key });
+            alert("TMDb API Key configured successfully!");
+            window.location.reload();
+          } catch (e) {
+            alert(`Failed: ${e}`);
+          }
+        }
+      });
+
+      unlistenPurge = await listen("menu-purge-database", async () => {
+        const password = prompt("Enter Admin Password to Purge Database:");
+        if (password === "4dmin123") {
+          if (confirm("Are you absolutely sure you want to PURGE the entire library, schedules, history, and settings? This cannot be undone.")) {
+            try {
+              const { invoke } = await import("@tauri-apps/api/core");
+              await invoke("purge_database");
+              alert("Library and database successfully purged. Reloading...");
+              window.location.reload();
+            } catch (e) {
+              alert(`Purge failed: ${e}`);
+            }
+          }
+        } else if (password !== null) {
+          alert("Access Denied: Incorrect Password.");
+        }
+      });
+    };
+
+    setupListeners();
+
+    return () => {
+      if (unlistenKey) unlistenKey();
+      if (unlistenPurge) unlistenPurge();
+    };
+  }, []);
+
+  // Show splash screen on boot sequence
+  if (!isBooted) {
+    return <SplashScreen onComplete={() => setIsBooted(true)} />;
   }
 
+  // Render the selected tab component
+  const renderContent = () => {
+    switch (activeTab) {
+      case "onair":
+        return <OnAir />;
+      case "library":
+        return <Library />;
+      case "grid":
+        return <Grid />;
+      case "database":
+        return <DatabaseViewer />;
+      case "health":
+        return <Health />;
+      case "suggestions":
+        return <Suggestions />;
+      default:
+        return <OnAir />;
+    }
+  };
+
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="h-screen w-screen flex bg-background text-gray-200 overflow-hidden font-mono">
+      {/* Retractable Navigation panel */}
+      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+      
+      {/* Main Pages viewport canvas */}
+      <main className="flex-1 h-full flex flex-col overflow-hidden relative">
+        {/* Scanline overlay for subtle retro NASA control room aesthetic */}
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.15)_50%)] bg-[size:100%_4px] pointer-events-none z-40 opacity-30" />
+        
+        <div className="flex-1 flex flex-col overflow-hidden relative z-10">
+          {renderContent()}
+        </div>
+      </main>
+    </div>
   );
 }
 
