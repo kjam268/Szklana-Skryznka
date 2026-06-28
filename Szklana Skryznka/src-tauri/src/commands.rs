@@ -207,6 +207,78 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
             .map_err(|e| e.to_string())?;
     }
 
+    // 4. Refresh directors
+    sqlx::query("DELETE FROM media_directors WHERE media_item_id = $1")
+        .bind(&details.item.id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for dir_name in &details.directors {
+        let director_id: Option<String> = sqlx::query_scalar("SELECT id FROM directors WHERE name = $1")
+            .bind(dir_name)
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let did = match director_id {
+            Some(id) => id,
+            None => {
+                let new_id = format!("dir_{}", uuid::Uuid::new_v4());
+                sqlx::query("INSERT INTO directors (id, name) VALUES ($1, $2)")
+                    .bind(&new_id)
+                    .bind(dir_name)
+                    .execute(&*pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                new_id
+            }
+        };
+
+        sqlx::query("INSERT INTO media_directors (media_item_id, director_id) VALUES ($1, $2)")
+            .bind(&details.item.id)
+            .bind(did)
+            .execute(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 5. Refresh actors (cast)
+    sqlx::query("DELETE FROM media_actors WHERE media_item_id = $1")
+        .bind(&details.item.id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for actor_name in &details.actors {
+        let actor_id: Option<String> = sqlx::query_scalar("SELECT id FROM actors WHERE name = $1")
+            .bind(actor_name)
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let aid = match actor_id {
+            Some(id) => id,
+            None => {
+                let new_id = format!("act_{}", uuid::Uuid::new_v4());
+                sqlx::query("INSERT INTO actors (id, name) VALUES ($1, $2)")
+                    .bind(&new_id)
+                    .bind(actor_name)
+                    .execute(&*pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                new_id
+            }
+        };
+
+        sqlx::query("INSERT INTO media_actors (media_item_id, actor_id) VALUES ($1, $2)")
+            .bind(&details.item.id)
+            .bind(aid)
+            .execute(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok("Media item metadata saved successfully".to_string())
 }
 
@@ -637,6 +709,20 @@ pub async fn purge_database(pool: DbState<'_>, target: String) -> Result<String,
             sqlx::query("DELETE FROM schedules").execute(&*pool).await.map_err(|e| e.to_string())?;
             Ok("Scheduled blocks successfully purged.".to_string())
         }
+        "all_keep_settings" => {
+            sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_directors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_tags").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM subtitles").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_files").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_items").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM schedule_entries").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM schedules").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM playback_history").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM watchlists").execute(&*pool).await.map_err(|e| e.to_string())?;
+            Ok("Library and schedule records successfully purged.".to_string())
+        }
         "all" => {
             sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
             sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
@@ -745,20 +831,38 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
     }
 
     // 4. Update MediaItem in database
-    sqlx::query(
-        "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, updated_at = $6 \
-         WHERE id = $7"
-    )
-    .bind(&item.title)
-    .bind(&online.synopsis)
-    .bind(online.rating)
-    .bind(&online.poster_path)
-    .bind(&online.backdrop_path)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(&item_id)
-    .execute(&*pool)
-    .await
-    .map_err(|e| format!("Failed to update media item: {}", e))?;
+    if let Some(online_rt) = online.runtime {
+        sqlx::query(
+            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, runtime = $6, updated_at = $7 \
+             WHERE id = $8"
+        )
+        .bind(&item.title)
+        .bind(&online.synopsis)
+        .bind(online.rating)
+        .bind(&online.poster_path)
+        .bind(&online.backdrop_path)
+        .bind(online_rt)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&item_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| format!("Failed to update media item: {}", e))?;
+    } else {
+        sqlx::query(
+            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, updated_at = $6 \
+             WHERE id = $7"
+        )
+        .bind(&item.title)
+        .bind(&online.synopsis)
+        .bind(online.rating)
+        .bind(&online.poster_path)
+        .bind(&online.backdrop_path)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&item_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| format!("Failed to update media item: {}", e))?;
+    }
 
     // 5. Refresh genres
     sqlx::query("DELETE FROM media_genres WHERE media_item_id = $1").bind(&item_id).execute(&*pool).await.map_err(|e| e.to_string())?;
@@ -794,6 +898,61 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
             act_id = Some(new_id);
         }
         sqlx::query("INSERT INTO media_actors (media_item_id, actor_id) VALUES ($1, $2)").bind(&item_id).bind(act_id.unwrap()).execute(&*pool).await.map_err(|e| e.to_string())?;
+    }
+
+    // 8. Refresh Automated Tags: "Documentary", "TV show", "Late Night", "Movie"
+    sqlx::query("DELETE FROM media_tags WHERE media_item_id = $1")
+        .bind(&item_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let mut auto_tags = Vec::new();
+    if item.media_type == "Movie" {
+        auto_tags.push("Movie".to_string());
+    }
+    if item.media_type == "Episode" || item.media_type == "TVShow" || item.media_type == "Anime" {
+        auto_tags.push("TV show".to_string());
+    }
+    if item.media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
+        auto_tags.push("Documentary".to_string());
+    }
+    let title_lower = item.title.to_lowercase();
+    if online.genres.iter().any(|g| g.to_lowercase().contains("talk") || g.to_lowercase().contains("late night"))
+        || title_lower.contains("late night")
+        || title_lower.contains("tonight show")
+        || title_lower.contains("daily show")
+        || title_lower.contains("kimmel")
+        || title_lower.contains("colbert")
+        || title_lower.contains("fallon")
+    {
+        auto_tags.push("Late Night".to_string());
+    }
+
+    for tag_name in &auto_tags {
+        let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
+            .bind(tag_name)
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if tag_id.is_none() {
+            let new_id = format!("tag_{}", uuid::Uuid::new_v4());
+            sqlx::query("INSERT INTO tags (id, name) VALUES ($1, $2)")
+                .bind(&new_id)
+                .bind(tag_name)
+                .execute(&*pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            tag_id = Some(new_id);
+        }
+
+        sqlx::query("INSERT INTO media_tags (media_item_id, tag_id) VALUES ($1, $2)")
+            .bind(&item_id)
+            .bind(tag_id.unwrap())
+            .execute(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     Ok("Metadata successfully refreshed from online API".to_string())

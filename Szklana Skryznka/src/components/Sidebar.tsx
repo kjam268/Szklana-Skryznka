@@ -4,6 +4,7 @@ import {
   Tv, Film, CalendarDays, Database, Activity, Lightbulb, 
   ChevronLeft, ChevronRight, Settings
 } from "lucide-react";
+import { useLibraryStore, useScheduleStore, useChannelStore } from "../store";
 
 interface SidebarProps {
   activeTab: string;
@@ -18,7 +19,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const [saveMessage, setSaveMessage] = useState("");
   const [tmdbStatus, setTmdbStatus] = useState<"checking" | "connected" | "disconnected" | "none">("checking");
 
-  const [purgeTarget, setPurgeTarget] = useState<"library" | "schedule" | "all">("library");
+  const [purgeTarget, setPurgeTarget] = useState<"library" | "schedule" | "all_keep_settings" | "all">("library");
   const [purgePassword, setPurgePassword] = useState("");
   const [isPurging, setIsPurging] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -312,21 +313,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <div className="border-t border-gray-800 pt-4 space-y-3">
               <span className="text-[9px] text-rose-500 font-bold tracking-widest uppercase">Danger Zone: Purge Assets</span>
               
-              <div className="space-y-1">
-                <label className="text-[8px] text-gray-500 tracking-wider uppercase font-bold">Admin Password</label>
-                <input
-                  type="password"
-                  placeholder="Enter password..."
-                  value={purgePassword}
-                  onChange={(e) => {
-                    setPurgePassword(e.target.value);
-                    setPurgeFeedback("");
-                  }}
-                  disabled={isPurging}
-                  className="w-full bg-gray-950 border border-gray-850 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-rose-500 text-rose-500 font-bold placeholder-gray-700"
-                />
-              </div>
-
               {purgeFeedback && (
                 <div className={`text-[10px] text-center font-bold p-1.5 rounded border ${
                   purgeFeedback.startsWith("Error") || purgeFeedback.startsWith("Access")
@@ -338,91 +324,153 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               )}
 
               {!confirmPurge ? (
-                <div className="space-y-2 pt-1 text-[10px]">
+                <div className="space-y-2 pt-1">
                   <button
                     type="button"
                     onClick={() => {
-                      if (purgePassword !== "4dmin123") {
-                        setPurgeFeedback("Access Denied: Incorrect Password.");
-                        return;
-                      }
                       setPurgeTarget("library");
                       setConfirmPurge(true);
-                      setPurgeFeedback("Permanently delete all cataloged library media items & files?");
+                      setPurgeFeedback("");
                     }}
-                    disabled={isPurging || !purgePassword}
-                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 text-rose-500 font-bold py-2 rounded transition-colors disabled:opacity-30 focus:outline-none"
+                    disabled={isPurging}
+                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 hover:bg-rose-950/25 text-rose-500 font-bold py-2 rounded text-[10px] transition-colors focus:outline-none"
                   >
                     PURGE LIBRARY ONLY
                   </button>
                   <button
                     type="button"
                     onClick={() => {
-                      if (purgePassword !== "4dmin123") {
-                        setPurgeFeedback("Access Denied: Incorrect Password.");
-                        return;
-                      }
                       setPurgeTarget("schedule");
                       setConfirmPurge(true);
-                      setPurgeFeedback("Permanently clear all scheduled EPG blocks & timelines?");
+                      setPurgeFeedback("");
                     }}
-                    disabled={isPurging || !purgePassword}
-                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 text-rose-500 font-bold py-2 rounded transition-colors disabled:opacity-30 focus:outline-none"
+                    disabled={isPurging}
+                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 hover:bg-rose-950/25 text-rose-500 font-bold py-2 rounded text-[10px] transition-colors focus:outline-none"
                   >
                     PURGE SCHEDULES ONLY
                   </button>
                   <button
                     type="button"
                     onClick={() => {
-                      if (purgePassword !== "4dmin123") {
-                        setPurgeFeedback("Access Denied: Incorrect Password.");
-                        return;
-                      }
-                      setPurgeTarget("all");
+                      setPurgeTarget("all_keep_settings");
                       setConfirmPurge(true);
-                      setPurgeFeedback("Permanently wipe everything (complete SQLite factory reset)?");
-                    }}
-                    disabled={isPurging || !purgePassword}
-                    className="w-full bg-transparent border border-rose-700 hover:bg-rose-950/20 text-rose-500 font-bold py-2 rounded transition-colors disabled:opacity-30 focus:outline-none"
-                  >
-                    FULL SQLITE PURGE
-                  </button>
-                </div>
-              ) : (
-                <div className="flex space-x-3 text-xs pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmPurge(false);
                       setPurgeFeedback("");
                     }}
                     disabled={isPurging}
-                    className="flex-1 bg-gray-900 border border-gray-800 text-gray-400 font-bold py-2 rounded-lg hover:text-gray-200 transition-all focus:outline-none"
+                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 hover:bg-rose-950/25 text-rose-500 font-bold py-2 rounded text-[10px] transition-colors focus:outline-none"
                   >
-                    CANCEL
+                    PURGE ALL
                   </button>
                   <button
                     type="button"
-                    onClick={async () => {
-                      setIsPurging(true);
-                      setPurgeFeedback("Executing database purge...");
-                      try {
-                        await invoke("purge_database", { target: purgeTarget });
-                        setPurgeFeedback("Purge succeeded! Reloading app...");
-                        setTimeout(() => {
-                          window.location.reload();
-                        }, 1000);
-                      } catch (e) {
-                        setPurgeFeedback(`Error: ${e}`);
-                        setIsPurging(false);
-                        setConfirmPurge(false);
-                      }
+                    onClick={() => {
+                      setPurgeTarget("all");
+                      setConfirmPurge(true);
+                      setPurgeFeedback("");
                     }}
                     disabled={isPurging}
-                    className="flex-1 bg-rose-600 text-white font-extrabold py-2 rounded-lg hover:bg-rose-500 transition-all focus:outline-none animate-pulse shadow-lg shadow-rose-900/20"
+                    className="w-full bg-transparent border border-rose-800/60 hover:border-rose-600 hover:bg-rose-950/25 text-rose-500 font-bold py-2 rounded text-[10px] transition-colors focus:outline-none"
                   >
-                    CONFIRM PURGE
+                    FULL DATABASE RESET
                   </button>
+                </div>
+              ) : (
+                <div className="space-y-3 pt-1 font-mono">
+                  <div className="text-[10px] text-gray-400 leading-relaxed">
+                    Confirm permanently deleting{" "}
+                    <span className="text-rose-500 font-bold">
+                      {purgeTarget === "library" && "all cataloged library media items & files"}
+                      {purgeTarget === "schedule" && "all scheduled EPG blocks & timelines"}
+                      {purgeTarget === "all_keep_settings" && "library and schedules (retaining configurations)"}
+                      {purgeTarget === "all" && "everything (complete SQLite database factory reset)"}
+                    </span>
+                    ? This action is irreversible.
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[8px] text-gray-500 tracking-wider uppercase font-bold">Admin Password</label>
+                    <input
+                      type="password"
+                      placeholder="Enter admin password..."
+                      value={purgePassword}
+                      onChange={(e) => {
+                        setPurgePassword(e.target.value);
+                        setPurgeFeedback("");
+                      }}
+                      disabled={isPurging}
+                      className="w-full bg-gray-950 border border-gray-850 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-rose-500 text-rose-500 font-bold placeholder-gray-700"
+                    />
+                  </div>
+
+                  <div className="flex space-x-3 text-xs pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmPurge(false);
+                        setPurgeFeedback("");
+                        setPurgePassword("");
+                      }}
+                      disabled={isPurging}
+                      className="flex-1 bg-gray-900 border border-gray-800 text-gray-400 font-bold py-2 rounded-lg hover:text-gray-200 transition-all focus:outline-none"
+                    >
+                      CANCEL
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (purgePassword !== "4dmin123") {
+                          setPurgeFeedback("Access Denied: Incorrect Password.");
+                          return;
+                        }
+                        
+                        setIsPurging(true);
+                        setPurgeFeedback("Executing database purge...");
+                        try {
+                          await invoke("purge_database", { target: purgeTarget });
+                          setPurgeFeedback("Purge succeeded!");
+                          
+                          // Dynamically refresh the relevant stores without reloading the page
+                          try {
+                            await useLibraryStore.getState().fetchItems();
+                          } catch (err) {
+                            console.error("Failed to refresh library store:", err);
+                          }
+                          
+                          try {
+                            const channelId = useChannelStore.getState().channels[0]?.id || "chan_default";
+                            const today = new Date();
+                            const day = today.getDay();
+                            const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+                            const startOfWeek = new Date(today.setDate(diff));
+                            startOfWeek.setHours(0, 0, 0, 0);
+                            
+                            const endOfWeek = new Date(startOfWeek);
+                            endOfWeek.setDate(endOfWeek.getDate() + 7);
+                            
+                            await useScheduleStore.getState().fetchEntries(channelId, startOfWeek.toISOString(), endOfWeek.toISOString());
+                            await useChannelStore.getState().fetchPlayoutState(channelId, new Date().toISOString());
+                          } catch (err) {
+                            console.error("Failed to refresh schedule or channel store:", err);
+                          }
+
+                          setTimeout(() => {
+                            setShowKeyModal(false);
+                            setConfirmPurge(false);
+                            setPurgeFeedback("");
+                            setPurgePassword("");
+                            setIsPurging(false);
+                          }, 1200);
+                        } catch (e) {
+                          setPurgeFeedback(`Error: ${e}`);
+                          setIsPurging(false);
+                        }
+                      }}
+                      disabled={isPurging || !purgePassword}
+                      className="flex-1 bg-rose-600 text-white font-extrabold py-2 rounded-lg hover:bg-rose-500 transition-all focus:outline-none animate-pulse shadow-lg shadow-rose-900/20 disabled:opacity-30"
+                    >
+                      CONFIRM PURGE
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

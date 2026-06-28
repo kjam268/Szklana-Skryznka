@@ -15,6 +15,7 @@ pub struct OnlineMetadata {
     pub directors: Vec<String>,
     pub cast: Vec<String>,
     pub genres: Vec<String>,
+    pub runtime: Option<i32>,
 }
 
 /// Helper to parse frame rates like "24/1" or "23976/1000" into f64
@@ -103,6 +104,13 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
 
                 let directors = vec!["TVmaze Producer".to_string()];
 
+                let mut runtime = None;
+                if let Some(r_mins) = parsed["runtime"].as_i64() {
+                    if r_mins > 0 {
+                        runtime = Some((r_mins * 60) as i32);
+                    }
+                }
+
                 return Some(OnlineMetadata {
                     synopsis,
                     rating,
@@ -111,6 +119,7 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
                     directors,
                     cast,
                     genres,
+                    runtime,
                 });
             }
         }
@@ -177,6 +186,7 @@ async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineM
                             directors,
                             cast,
                             genres,
+                            runtime: None,
                         });
                     }
                 }
@@ -193,6 +203,19 @@ pub async fn fetch_online_metadata(
     media_type: &str,
     api_key: Option<String>,
 ) -> OnlineMetadata {
+    // If it is a TV show, episode, or anime, clean the query title to extract series name
+    let mut search_title = title.to_string();
+    if media_type == "TVShow" || media_type == "Episode" || media_type == "Anime" {
+        let re_episode = regex::Regex::new(r"(?i)\b(s\d{1,2}e\d{1,2}|season\s+\d+|episode\s+\d+|\d+x\d+)\b").unwrap();
+        if let Some(mat) = re_episode.find(title) {
+            let idx = mat.start();
+            search_title = title[..idx].trim().trim_end_matches('-').trim().to_string();
+        }
+    }
+    if search_title.is_empty() {
+        search_title = title.to_string();
+    }
+
     // 1. Try TMDb first if API key is provided
     if let Some(key) = api_key {
         let key_trimmed = key.trim();
@@ -203,19 +226,27 @@ pub async fn fetch_online_metadata(
                 .unwrap_or_else(|_| reqwest::Client::new());
             
             let query_type = if media_type == "TVShow" || media_type == "Episode" || media_type == "Anime" { "tv" } else { "movie" };
-            let year_param = if let Some(y) = year { format!("&year={}", y) } else { "".to_string() };
+            let year_param = if let Some(y) = year {
+                if query_type == "tv" {
+                    format!("&first_air_date_year={}", y)
+                } else {
+                    format!("&year={}", y)
+                }
+            } else {
+                "".to_string()
+            };
             
             let is_v4 = key_trimmed.len() > 45;
             
             let search_url = if is_v4 {
                 format!(
                     "https://api.themoviedb.org/3/search/{}?query={}{}",
-                    query_type, urlencode(title), year_param
+                    query_type, urlencode(&search_title), year_param
                 )
             } else {
                 format!(
                     "https://api.themoviedb.org/3/search/{}?api_key={}&query={}{}",
-                    query_type, key_trimmed, urlencode(title), year_param
+                    query_type, key_trimmed, urlencode(&search_title), year_param
                 )
             };
 
@@ -261,6 +292,7 @@ pub async fn fetch_online_metadata(
                                     let mut directors = Vec::new();
                                     let mut cast = Vec::new();
                                     let mut genres = Vec::new();
+                                    let mut online_runtime = None;
 
                                     match detail_req.send().await {
                                         Ok(detail_res) => {
@@ -293,6 +325,25 @@ pub async fn fetch_online_metadata(
                                                             }
                                                         }
                                                     }
+                                                    
+                                                    // Extract TMDb runtime (movies = runtime, tv shows = episode_run_time)
+                                                    if query_type == "movie" {
+                                                        if let Some(r_mins) = detail_parsed["runtime"].as_i64() {
+                                                            if r_mins > 0 {
+                                                                online_runtime = Some((r_mins * 60) as i32);
+                                                            }
+                                                        }
+                                                    } else {
+                                                        if let Some(run_times) = detail_parsed["episode_run_time"].as_array() {
+                                                            if !run_times.is_empty() {
+                                                                if let Some(rt) = run_times[0].as_i64() {
+                                                                    if rt > 0 {
+                                                                        online_runtime = Some((rt * 60) as i32);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                                 Err(e) => eprintln!("TMDb detail JSON parse error: {}", e),
                                             }
@@ -308,9 +359,10 @@ pub async fn fetch_online_metadata(
                                         directors,
                                         cast,
                                         genres,
+                                        runtime: online_runtime,
                                     };
                                 } else {
-                                    eprintln!("TMDb search returned no results for title: {}", title);
+                                    eprintln!("TMDb search returned no results for title: {}", search_title);
                                 }
                             }
                         }
@@ -326,7 +378,7 @@ pub async fn fetch_online_metadata(
 
     // 2. Try TVmaze for TV Shows and Episodes (No Key Required)
     if media_type == "TVShow" || media_type == "Episode" {
-        if let Some(meta) = fetch_tvmaze_metadata(title, year).await {
+        if let Some(meta) = fetch_tvmaze_metadata(&search_title, year).await {
             return meta;
         }
     }
@@ -349,6 +401,7 @@ pub async fn fetch_online_metadata(
             directors: vec!["Lana Wachowski".to_string(), "Lilly Wachowski".to_string()],
             cast: vec!["Keanu Reeves".to_string(), "Laurence Fishburne".to_string(), "Carrie-Anne Moss".to_string()],
             genres: vec!["Action".to_string(), "Science Fiction".to_string()],
+            runtime: Some(8160),
         }
     } else if title_l.contains("interstellar") {
         OnlineMetadata {
@@ -359,6 +412,7 @@ pub async fn fetch_online_metadata(
             directors: vec!["Christopher Nolan".to_string()],
             cast: vec!["Matthew McConaughey".to_string(), "Anne Hathaway".to_string(), "Jessica Chastain".to_string()],
             genres: vec!["Science Fiction".to_string(), "Drama".to_string(), "Adventure".to_string()],
+            runtime: Some(10140),
         }
     } else if title_l.contains("inception") {
         OnlineMetadata {
@@ -369,6 +423,7 @@ pub async fn fetch_online_metadata(
             directors: vec!["Christopher Nolan".to_string()],
             cast: vec!["Leonardo DiCaprio".to_string(), "Joseph Gordon-Levitt".to_string(), "Elliot Page".to_string()],
             genres: vec!["Action".to_string(), "Science Fiction".to_string(), "Adventure".to_string()],
+            runtime: Some(8880),
         }
     } else if title_l.contains("blade runner") {
         OnlineMetadata {
@@ -379,6 +434,7 @@ pub async fn fetch_online_metadata(
             directors: vec!["Denis Villeneuve".to_string()],
             cast: vec!["Ryan Gosling".to_string(), "Harrison Ford".to_string(), "Ana de Armas".to_string()],
             genres: vec!["Science Fiction".to_string(), "Drama".to_string()],
+            runtime: Some(9840),
         }
     } else {
         // Generic fallback values
@@ -398,6 +454,7 @@ pub async fn fetch_online_metadata(
             directors: vec!["Alan Smithee".to_string()],
             cast: vec!["John Doe".to_string(), "Jane Smith".to_string()],
             genres: display_genres,
+            runtime: None,
         }
     }
 }
@@ -479,7 +536,7 @@ pub fn extract_metadata(path: &Path) -> (
     let path_str = path.to_string_lossy();
     
     // Execute ffprobe with detailed stream tags
-    let output = Command::new("ffprobe")
+    let mut output = Command::new("ffprobe")
         .args([
             "-v", "error",
             "-show_entries", "format=duration,bit_rate",
@@ -488,6 +545,28 @@ pub fn extract_metadata(path: &Path) -> (
             &path_str
         ])
         .output();
+
+    // If PATH execution failed or binary not found, try common macOS install directories
+    if output.is_err() || output.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
+        let alt_paths = ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"];
+        for p in alt_paths {
+            if let Ok(out) = Command::new(p)
+                .args([
+                    "-v", "error",
+                    "-show_entries", "format=duration,bit_rate",
+                    "-show_entries", "stream=codec_name,width,height,channels,r_frame_rate,tags",
+                    "-of", "json",
+                    &path_str
+                ])
+                .output()
+            {
+                if out.status.success() {
+                    output = Ok(out);
+                    break;
+                }
+            }
+        }
+    }
 
     if let Ok(out) = output {
         if out.status.success() {
@@ -546,12 +625,24 @@ pub fn extract_metadata(path: &Path) -> (
             }
         }
     } else {
-        // Fallback: heuristic based on file size
+        // Fallback: heuristic based on file size if ffprobe is completely missing
         if let Ok(meta) = fs::metadata(path) {
             let size = meta.len();
-            let estimated_dur = (size / 1_000_000) as i32;
-            if estimated_dur > 0 {
-                duration = estimated_dur;
+            let name_lower = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            let is_episode = name_lower.contains("s0") || name_lower.contains("s1") || name_lower.contains("e0") || name_lower.contains("e1") || size < 600_000_000;
+            
+            if is_episode {
+                // TV episodes average ~1.5 Mbps (187,500 bytes/sec)
+                let estimated_dur = (size / 187_500) as i32;
+                if estimated_dur > 0 {
+                    duration = estimated_dur;
+                }
+            } else {
+                // Movies average ~2.78 Mbps (347,500 bytes/sec)
+                let estimated_dur = (size / 347_500) as i32;
+                if estimated_dur > 0 {
+                    duration = estimated_dur;
+                }
             }
         }
     }
@@ -604,6 +695,54 @@ fn clean_filename(filename: &str) -> (String, Option<i32>) {
     (final_title, year)
 }
 
+fn clean_tv_filename(filename: &str) -> Option<(String, String, String)> {
+    let re_se = regex::Regex::new(r"(?i)\b(s\d{2}e\d{2})\b").unwrap();
+    if let Some(mat) = re_se.find(filename) {
+        let se_str = mat.as_str().to_uppercase();
+        let idx_start = mat.start();
+        let idx_end = mat.end();
+
+        let mut show_name = filename[..idx_start].to_string();
+        show_name = show_name.replace('.', " ").replace('_', " ");
+        show_name = regex::Regex::new(r"\s+").unwrap().replace_all(&show_name, " ").trim().to_string();
+
+        let mut ep_raw = filename[idx_end..].to_string();
+        if let Some(pos) = ep_raw.rfind('.') {
+            let ext = &ep_raw[pos..];
+            if ext.len() <= 5 {
+                ep_raw = ep_raw[..pos].to_string();
+            }
+        }
+        
+        let re_brackets = regex::Regex::new(r"\[[^\]]*\]|\([^\)]*\)").unwrap();
+        ep_raw = re_brackets.replace_all(&ep_raw, "").into_owned();
+        ep_raw = ep_raw.replace('.', " ").replace('_', " ");
+
+        let tags_to_remove = [
+            "1080p", "720p", "4k", "2160p", "bluray", "h264", "h265", "x264", "x265",
+            "web-dl", "webrip", "aac", "dts", "dd5.1", "yify", "rarbg", "hevc", "remux"
+        ];
+        for tag in tags_to_remove {
+            ep_raw = ep_raw.replace(tag, "");
+            ep_raw = ep_raw.replace(&tag.to_uppercase(), "");
+        }
+
+        let mut cleaned_ep = String::new();
+        let chars: Vec<char> = ep_raw.chars().collect();
+        for i in 0..chars.len() {
+            let c = chars[i];
+            if c.is_alphanumeric() || c.is_whitespace() || c == '\'' || c == '-' {
+                cleaned_ep.push(c);
+            }
+        }
+
+        let ep_name = regex::Regex::new(r"\s+").unwrap().replace_all(&cleaned_ep, " ").trim().to_string();
+
+        return Some((show_name, se_str, ep_name));
+    }
+    None
+}
+
 /// Parse filename to retrieve Title, Year, and Media Type
 pub fn parse_filename(path: &Path) -> (String, Option<i32>, String) {
     let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
@@ -632,18 +771,34 @@ pub fn parse_filename(path: &Path) -> (String, Option<i32>, String) {
         "Movie".to_string()
     };
 
-    let (mut title, year) = clean_filename(filename);
+    let mut year = None;
+    let mut title = String::new();
 
-    // Clean up common video metadata tags in title
-    let tags_to_remove = [
-        "1080p", "720p", "4k", "2160p", "bluray", "h264", "h265", "x264", "x265",
-        "web-dl", "webrip", "aac", "dts", "dd5.1", "yify", "rarbg", "hevc", "remux"
-    ];
-    for tag in tags_to_remove {
-        title = title.replace(tag, "");
-        title = title.replace(&tag.to_uppercase(), "");
+    if media_type == "Episode" {
+        if let Some((show_name, se_str, ep_name)) = clean_tv_filename(filename) {
+            if ep_name.is_empty() {
+                title = format!("{} - {}", show_name, se_str);
+            } else {
+                title = format!("{} - {} - {}", show_name, se_str, ep_name);
+            }
+        }
     }
-    title = title.trim().to_string();
+
+    if title.is_empty() {
+        let (mut cleaned_title, parsed_year) = clean_filename(filename);
+        year = parsed_year;
+
+        // Clean up common video metadata tags in title
+        let tags_to_remove = [
+            "1080p", "720p", "4k", "2160p", "bluray", "h264", "h265", "x264", "x265",
+            "web-dl", "webrip", "aac", "dts", "dd5.1", "yify", "rarbg", "hevc", "remux"
+        ];
+        for tag in tags_to_remove {
+            cleaned_title = cleaned_title.replace(tag, "");
+            cleaned_title = cleaned_title.replace(&tag.to_uppercase(), "");
+        }
+        title = cleaned_title.trim().to_string();
+    }
 
     if title.is_empty() {
         title = filename.to_string();
@@ -957,6 +1112,7 @@ pub async fn scan_directory(
 
             // Create a new MediaItem
             let new_item_id = format!("item_{}", uuid::Uuid::new_v4());
+            let final_runtime = online.runtime.unwrap_or(duration);
             sqlx::query(
                 "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
@@ -966,7 +1122,7 @@ pub async fn scan_directory(
             .bind(&title)
             .bind(&media_type)
             .bind(year)
-            .bind(duration)
+            .bind(final_runtime)
             .bind(&online.synopsis)
             .bind(online.rating)
             .bind(&online.poster_path)
@@ -1042,6 +1198,52 @@ pub async fn scan_directory(
                 sqlx::query("INSERT INTO media_actors (media_item_id, actor_id) VALUES ($1, $2)")
                     .bind(&new_item_id)
                     .bind(act_id.unwrap())
+                    .execute(pool)
+                    .await?;
+            }
+
+            // Populate Automated Tags: "Documentary", "TV show", "Late Night", "Movie"
+            let mut auto_tags = Vec::new();
+            if media_type == "Movie" {
+                auto_tags.push("Movie".to_string());
+            }
+            if media_type == "Episode" || media_type == "TVShow" || media_type == "Anime" {
+                auto_tags.push("TV show".to_string());
+            }
+            if media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
+                auto_tags.push("Documentary".to_string());
+            }
+            let title_lower = title.to_lowercase();
+            if online.genres.iter().any(|g| g.to_lowercase().contains("talk") || g.to_lowercase().contains("late night"))
+                || title_lower.contains("late night")
+                || title_lower.contains("tonight show")
+                || title_lower.contains("daily show")
+                || title_lower.contains("kimmel")
+                || title_lower.contains("colbert")
+                || title_lower.contains("fallon")
+            {
+                auto_tags.push("Late Night".to_string());
+            }
+
+            for tag_name in &auto_tags {
+                let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
+                    .bind(tag_name)
+                    .fetch_optional(pool)
+                    .await?;
+
+                if tag_id.is_none() {
+                    let new_id = format!("tag_{}", uuid::Uuid::new_v4());
+                    sqlx::query("INSERT INTO tags (id, name) VALUES ($1, $2)")
+                        .bind(&new_id)
+                        .bind(tag_name)
+                        .execute(pool)
+                        .await?;
+                    tag_id = Some(new_id);
+                }
+
+                sqlx::query("INSERT INTO media_tags (media_item_id, tag_id) VALUES ($1, $2)")
+                    .bind(&new_item_id)
+                    .bind(tag_id.unwrap())
                     .execute(pool)
                     .await?;
             }

@@ -57,10 +57,8 @@ export const Grid: React.FC = () => {
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) {
-      return `${h}h ${String(m).padStart(2, "0")}m`;
-    }
-    return `${m}m`;
+    const s = Math.floor(seconds % 60);
+    return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   };
 
   const channelId = channels[0]?.id || "chan_default";

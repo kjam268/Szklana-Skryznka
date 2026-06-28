@@ -84,14 +84,11 @@ export const OnAir: React.FC = () => {
   const activeEntry = playoutState?.active_entry;
   const nextEntry = playoutState?.next_entry;
 
-  const formatRuntime = (runtimeSec: number) => {
-    const minutes = Math.round(runtimeSec / 60);
-    const h = Math.floor(minutes / 60);
-    const m = minutes % 60;
-    if (h > 0) {
-      return `${h}h ${m.toString().padStart(2, "0")}m`;
-    }
-    return `${m}m`;
+  const formatRuntime = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   };
 
   const handleFullscreen = () => {

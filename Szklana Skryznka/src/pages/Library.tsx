@@ -12,18 +12,19 @@ export const Library: React.FC = () => {
   const [selectedItem, setSelectedItem] = useState<MediaItemDetails | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [scanPath, setScanPath] = useState("");
-  const [selectedTagFilter, setSelectedTagFilter] = useState("All");
+  const [selectedTab, setSelectedTab] = useState("All");
+  const [selectedShow, setSelectedShow] = useState<string | null>(null);
   const [editTags, setEditTags] = useState<string[]>([]);
   const [isTagsDropdownOpen, setIsTagsDropdownOpen] = useState(false);
+  const [editDirectors, setEditDirectors] = useState("");
+  const [editActors, setEditActors] = useState("");
   const availableTags = ["Favorites", "Kids", "Late Night", "Classic", "Must Watch", "Holiday"];
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
-    if (h > 0) {
-      return `${h}h ${String(m).padStart(2, "0")}m`;
-    }
-    return `${m}m`;
+    const s = Math.floor(seconds % 60);
+    return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   };
 
   const handleBrowseFolder = async () => {
@@ -87,6 +88,8 @@ export const Library: React.FC = () => {
     setEditBackdrop(details.item.backdrop_path || "");
     setEditGenres(details.genres.join(", "));
     setEditTags(details.tags);
+    setEditDirectors((details.directors || []).join(", "));
+    setEditActors((details.actors || []).join(", "));
   };
 
   const handleSaveMetadata = async () => {
@@ -106,6 +109,8 @@ export const Library: React.FC = () => {
       },
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
       tags: editTags,
+      directors: editDirectors.split(",").map((d) => d.trim()).filter((d) => d !== ""),
+      actors: editActors.split(",").map((a) => a.trim()).filter((a) => a !== ""),
     };
     await saveMetadata(updated);
     setSelectedItem(updated);
@@ -144,17 +149,23 @@ export const Library: React.FC = () => {
     }
   };
 
-  // Filter items based on search query, selected media type, and tag filter
+  const getShowName = (title: string) => {
+    const match = title.match(/^(.*?) - S\d{2}E\d{2}/i);
+    if (match) {
+      return match[1].trim();
+    }
+    return title;
+  };
+
+  // Filter items based on search query and tag filter (represented by selectedTab)
   const filteredItems = items.filter((details) => {
     const titleMatch = details.item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                        (details.item.original_title && details.item.original_title.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    const typeMatch = selectedType === "All" || details.item.media_type === selectedType;
-    const tagMatch = selectedTagFilter === "All" || details.tags.includes(selectedTagFilter);
-    return titleMatch && typeMatch && tagMatch;
+    const tagMatch = selectedTab === "All" || details.tags.includes(selectedTab);
+    return titleMatch && tagMatch;
   });
 
-  const mediaTypes = ["All", "Movie", "TVShow", "Episode", "Anime", "Documentary", "Educational", "Bumper", "StationID", "Trailer"];
+  const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Late Night", "Favorites", "Kids", "Classic", "Must Watch", "Holiday"];
 
   const getPosterUrl = (path?: string) => {
     if (!path) return "";
@@ -214,34 +225,21 @@ export const Library: React.FC = () => {
                 className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent"
               />
             </div>
-            {/* Tag Filter Dropdown */}
-            <div className="relative">
-              <select
-                value={selectedTagFilter}
-                onChange={(e) => setSelectedTagFilter(e.target.value)}
-                className="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-accent text-accent font-bold h-full font-mono"
-              >
-                <option value="All">All Tags</option>
-                <option value="Favorites">Favorites</option>
-                <option value="Kids">Kids</option>
-                <option value="Late Night">Late Night</option>
-                <option value="Classic">Classic</option>
-                <option value="Must Watch">Must Watch</option>
-                <option value="Holiday">Holiday</option>
-              </select>
-            </div>
-            <div className="flex space-x-1.5 overflow-x-auto max-w-lg scrollbar-thin">
-              {mediaTypes.map((type) => (
+            <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-thin">
+              {libraryTabs.map((tab) => (
                 <button
-                  key={type}
-                  onClick={() => setSelectedType(type)}
-                  className={`text-xs px-3 py-2 rounded-lg font-mono transition-colors ${
-                    selectedType === type
-                      ? "bg-accent/15 text-accent border border-accent/30"
+                  key={tab}
+                  onClick={() => {
+                    setSelectedTab(tab);
+                    setSelectedShow(null);
+                  }}
+                  className={`text-xs px-3 py-2 rounded-lg font-mono transition-colors whitespace-nowrap ${
+                    selectedTab === tab
+                      ? "bg-accent/15 text-accent border border-accent/30 font-bold"
                       : "bg-panel border border-gray-800 text-gray-400 hover:text-gray-200"
                   }`}
                 >
-                  {type.toUpperCase()}
+                  {tab.toUpperCase()}
                 </button>
               ))}
             </div>
@@ -271,7 +269,126 @@ export const Library: React.FC = () => {
             <div className="h-full flex items-center justify-center text-xs text-gray-600">
               No media items matching filters in this collection.
             </div>
+          ) : selectedTab === "TV show" ? (
+            (() => {
+              // Group items by TV Show Name
+              const groupedShows: { [showName: string]: MediaItemDetails[] } = {};
+              filteredItems.forEach((details) => {
+                const showName = getShowName(details.item.title);
+                if (!groupedShows[showName]) {
+                  groupedShows[showName] = [];
+                }
+                groupedShows[showName].push(details);
+              });
+
+              if (selectedShow) {
+                // Render episodes for the selected show
+                const episodes = groupedShows[selectedShow] || [];
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-center space-x-3 mb-2">
+                      <button
+                        onClick={() => setSelectedShow(null)}
+                        className="text-[10px] bg-gray-900 border border-gray-800 text-gray-400 hover:text-accent font-bold px-3 py-1.5 rounded transition-all focus:outline-none flex items-center space-x-1"
+                      >
+                        <span>←</span> <span>BACK TO TV SHOWS</span>
+                      </button>
+                      <span className="text-xs font-bold text-accent tracking-widest">{selectedShow.toUpperCase()}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
+                      {episodes.map((details) => {
+                        const isSelected = selectedItem?.item.id === details.item.id;
+                        return (
+                          <div
+                            key={details.item.id}
+                            onClick={() => handleSelectCard(details)}
+                            className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
+                              isSelected ? "border-accent cyan-glow" : "border-gray-800 hover:border-gray-600"
+                            }`}
+                          >
+                            <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
+                              {details.item.poster_path ? (
+                                <img
+                                  src={getPosterUrl(details.item.poster_path)}
+                                  alt={details.item.title}
+                                  className="w-full h-full object-cover"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
+                                  <Film size={32} />
+                                  <span className="text-[10px] text-gray-500">NO ART</span>
+                                </div>
+                              )}
+                              <div className="absolute top-2 left-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
+                                {details.item.media_type.toUpperCase()}
+                              </div>
+                            </div>
+                            <div className="p-3 space-y-1">
+                              <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
+                              <div className="flex justify-between items-center text-[10px] text-gray-500">
+                                <span>{details.item.year || "Unknown"}</span>
+                                <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              }
+
+              // Render grouped TV Shows list
+              const showNames = Object.keys(groupedShows);
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
+                  {showNames.map((showName) => {
+                    const group = groupedShows[showName];
+                    const firstItem = group[0];
+                    // Find a poster path if available
+                    const posterItem = group.find(item => item.item.poster_path);
+                    const posterPath = posterItem ? posterItem.item.poster_path : firstItem.item.poster_path;
+                    
+                    return (
+                      <div
+                        key={showName}
+                        onClick={() => setSelectedShow(showName)}
+                        className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
+                      >
+                        <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
+                          {posterPath ? (
+                            <img
+                              src={getPosterUrl(posterPath)}
+                              alt={showName}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
+                              <Film size={32} />
+                              <span className="text-[10px] text-gray-500">NO ART</span>
+                            </div>
+                          )}
+                          <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
+                            TV SHOW
+                          </div>
+                        </div>
+                        <div className="p-3 space-y-1">
+                          <div className="text-xs font-bold text-gray-200 truncate">{showName}</div>
+                          <div className="flex justify-between items-center text-[10px] text-accent">
+                            <span className="font-bold tracking-wider font-mono">{group.length} {group.length === 1 ? "EPISODE" : "EPISODES"}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()
           ) : (
+            // Flat grid of items for other tabs
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
               {filteredItems.map((details) => {
                 const isSelected = selectedItem?.item.id === details.item.id;
@@ -307,7 +424,7 @@ export const Library: React.FC = () => {
                       <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
                       <div className="flex justify-between items-center text-[10px] text-gray-500">
                         <span>{details.item.year || "Unknown"}</span>
-                        <span>{formatRuntime(details.item.runtime)}</span>
+                        <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
                       </div>
                     </div>
                   </div>
@@ -359,25 +476,14 @@ export const Library: React.FC = () => {
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] text-gray-500 tracking-wider">YEAR</label>
-                    <input
-                      type="number"
-                      value={editYear}
-                      onChange={(e) => setEditYear(parseInt(e.target.value))}
-                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] text-gray-500 tracking-wider">RUNTIME (SEC)</label>
-                    <input
-                      type="number"
-                      value={editRuntime}
-                      onChange={(e) => setEditRuntime(parseInt(e.target.value))}
-                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
-                    />
-                  </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-gray-500 tracking-wider">YEAR</label>
+                  <input
+                    type="number"
+                    value={editYear}
+                    onChange={(e) => setEditYear(parseInt(e.target.value))}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
+                  />
                 </div>
 
                 <div className="space-y-1.5">
@@ -386,6 +492,26 @@ export const Library: React.FC = () => {
                     type="text"
                     value={editGenres}
                     onChange={(e) => setEditGenres(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-gray-500 tracking-wider">DIRECTOR(S) (COMMA-SEPARATED)</label>
+                  <input
+                    type="text"
+                    value={editDirectors}
+                    onChange={(e) => setEditDirectors(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-gray-500 tracking-wider">CAST / ACTORS (COMMA-SEPARATED)</label>
+                  <input
+                    type="text"
+                    value={editActors}
+                    onChange={(e) => setEditActors(e.target.value)}
                     className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
                   />
                 </div>
