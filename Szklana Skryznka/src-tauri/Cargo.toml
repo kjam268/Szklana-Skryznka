@@ -30,5 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 md5 = "0.7.0"
 rfd = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json"] }
+regex = "1"
+
 

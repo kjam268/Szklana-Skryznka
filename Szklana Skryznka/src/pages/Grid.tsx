@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, useScheduleStore, useChannelStore, MediaItemDetails, ScheduleEntryDetails } from "../store";
@@ -30,6 +30,29 @@ export const Grid: React.FC = () => {
   const [schedMin, setSchedMin] = useState("00");
   const [searchQuery, setSearchQuery] = useState("");
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
+
+  const timeColumnRef = useRef<HTMLDivElement>(null);
+  const gridCellsRef = useRef<HTMLDivElement>(null);
+
+  const getEntryPosition = (e: ScheduleEntryDetails, dayStart: Date, dayEnd: Date) => {
+    const estart = new Date(e.start_time);
+    const eend = new Date(e.end_time);
+
+    // Clip to day start and end
+    const displayStart = estart < dayStart ? dayStart : estart;
+    const displayEnd = eend > dayEnd ? dayEnd : eend;
+
+    const startMs = displayStart.getTime() - dayStart.getTime();
+    const durationMs = displayEnd.getTime() - displayStart.getTime();
+
+    // 30 minutes = 1800000 ms = 64px
+    const msToPx = 64 / 1800000;
+
+    const top = startMs * msToPx;
+    const height = durationMs * msToPx;
+
+    return { top, height };
+  };
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -151,10 +174,13 @@ export const Grid: React.FC = () => {
         </div>
 
         {/* TIMELINE LIST CANVAS */}
-        <div className="flex-1 overflow-y-auto mt-6 border border-gray-800 bg-gray-950 rounded-lg shadow-inner flex flex-row">
+        <div className="flex-1 overflow-hidden mt-6 border border-gray-800 bg-gray-950 rounded-lg shadow-inner flex flex-row">
           
           {/* LEFT: STATIC TIME INDICATORS COLUMN (fixed horizontally, scrolls vertically with container) */}
-          <div className="w-20 shrink-0 flex flex-col bg-gray-950 border-r border-gray-800 select-none">
+          <div 
+            ref={timeColumnRef}
+            className="w-20 shrink-0 flex flex-col bg-gray-950 border-r border-gray-800 select-none overflow-hidden"
+          >
             {/* TIME Header Box */}
             <div className="p-3 h-[43px] text-center text-[10px] text-gray-500 font-bold border-b border-gray-800 bg-gray-900 sticky top-0 z-30 flex items-center justify-center uppercase">
               TIME
@@ -168,23 +194,28 @@ export const Grid: React.FC = () => {
               
               let labelColor = "";
               let labelText = "";
+              let timeBlockColor = "";
               if (hour >= 7 && hour < 12) {
                 labelColor = "text-cyan-500/80";
                 labelText = "MORNING";
+                timeBlockColor = "bg-cyan-950/35 border-r border-cyan-800/40 border-b border-gray-900/50";
               } else if (hour >= 12 && hour < 17) {
                 labelColor = "text-amber-500/80";
                 labelText = "AFTERNOON";
+                timeBlockColor = "bg-amber-950/35 border-r border-amber-800/40 border-b border-gray-900/50";
               } else if (hour >= 17 && hour < 22) {
                 labelColor = "text-orange-500/80";
                 labelText = "EVENING";
+                timeBlockColor = "bg-orange-950/35 border-r border-orange-800/40 border-b border-gray-900/50";
               } else {
                 labelColor = "text-indigo-400/80";
                 labelText = "NIGHT";
+                timeBlockColor = "bg-indigo-950/35 border-r border-indigo-900/40 border-b border-gray-900/50";
               }
 
               return (
-                <div key={slotIdx} className="h-[64px] shrink-0 border-b border-gray-900/50 flex flex-col items-center justify-center space-y-0.5 bg-gray-950">
-                  <span className="text-[11px] font-bold text-gray-400">{hourStr}</span>
+                <div key={slotIdx} className={`h-[64px] shrink-0 flex flex-col items-center justify-center space-y-0.5 ${timeBlockColor}`}>
+                  <span className="text-[11px] font-bold text-gray-200">{hourStr}</span>
                   <span className={`text-[7px] font-bold tracking-widest ${labelColor}`}>{labelText}</span>
                 </div>
               );
@@ -192,7 +223,15 @@ export const Grid: React.FC = () => {
           </div>
 
           {/* RIGHT: SCROLLABLE DAYS GRID */}
-          <div className="flex-1 overflow-x-auto">
+          <div 
+            ref={gridCellsRef}
+            onScroll={(e) => {
+              if (timeColumnRef.current) {
+                timeColumnRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+            }}
+            className="flex-1 overflow-auto"
+          >
             <div className="min-w-[1250px] flex flex-col">
               {/* Header row */}
               <div className="flex border-b border-gray-800 bg-gray-900/90 sticky top-0 z-30">
@@ -204,28 +243,105 @@ export const Grid: React.FC = () => {
               </div>
 
               {/* Grid slots cells */}
-              <div className="flex flex-col">
-                {Array.from({ length: 48 }, (_, slotIdx) => {
-                  const hourIdx = Math.floor(slotIdx / 2);
-                  const isHalfHour = slotIdx % 2 === 1;
-                  const hour = (7 + hourIdx) % 24;
+              <div className="flex">
+                {weekDays.map((dayDate, dayIdx) => {
+                  const dayStart = getSlotDateTimeRange(dayDate, 0).start;
+                  const dayEnd = getSlotDateTimeRange(dayDate, 47).end;
 
-                  let blockColor = "";
-                  if (hour >= 7 && hour < 12) {
-                    blockColor = "bg-cyan-950/10 border-cyan-800/10 hover:bg-cyan-950/20";
-                  } else if (hour >= 12 && hour < 17) {
-                    blockColor = "bg-amber-950/10 border-amber-800/10 hover:bg-amber-950/20";
-                  } else if (hour >= 17 && hour < 22) {
-                    blockColor = "bg-orange-950/10 border-orange-800/10 hover:bg-orange-950/20";
-                  } else {
-                    blockColor = "bg-indigo-950/10 border-indigo-900/10 hover:bg-indigo-950/20";
-                  }
+                  // Filter entries for this specific day (overlapping the 07:00 to 07:00 next day range)
+                  const dayEntries = entries.filter((e) => {
+                    const estart = new Date(e.start_time);
+                    const eend = new Date(e.end_time);
+                    return estart < dayEnd && eend > dayStart;
+                  });
 
                   return (
-                    <div key={slotIdx} className="flex border-b border-gray-900/50 h-[64px] shrink-0">
-                      {weekDays.map((dayDate, dayIdx) => {
+                    <div 
+                      key={dayIdx} 
+                      className="flex-1 flex flex-col relative border-r border-gray-900"
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const y = e.clientY - rect.top;
+                        const slotIdx = Math.max(0, Math.min(47, Math.floor(y / 64)));
+                        setDragOverCell({ dayIdx, hourIdx: slotIdx });
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "copy";
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const y = e.clientY - rect.top;
+                        const slotIdx = Math.max(0, Math.min(47, Math.floor(y / 64)));
+                        setDragOverCell({ dayIdx, hourIdx: slotIdx });
+                      }}
+                      onDragLeave={() => {
+                        setDragOverCell(null);
+                      }}
+                      onDrop={async (e) => {
+                        e.preventDefault();
+                        setDragOverCell(null);
+                        const itemId = e.dataTransfer.getData("text/plain") || draggedItemId;
+                        setDraggedItemId(null);
+                        if (!itemId) return;
+
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const y = e.clientY - rect.top;
+                        const slotIdx = Math.max(0, Math.min(47, Math.floor(y / 64)));
+                        const { start: slotStart } = getSlotDateTimeRange(dayDate, slotIdx);
+
+                        try {
+                          await invoke("create_schedule", {
+                            channelId,
+                            mediaItemId: itemId,
+                            startTimeIso: slotStart.toISOString(),
+                            isLocked: true,
+                            explanation: "Manually drag-and-drop programmed block"
+                          });
+                          loadScheduleData();
+                        } catch (err) {
+                          alert(`Failed to schedule item: ${err}`);
+                        }
+                      }}
+                      onClick={async (e) => {
+                        if (draggedItemId) {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const y = e.clientY - rect.top;
+                          const slotIdx = Math.max(0, Math.min(47, Math.floor(y / 64)));
+                          const { start: slotStart } = getSlotDateTimeRange(dayDate, slotIdx);
+                          try {
+                            await invoke("create_schedule", {
+                              channelId,
+                              mediaItemId: draggedItemId,
+                              startTimeIso: slotStart.toISOString(),
+                              isLocked: true,
+                              explanation: "Manually programmed block via selection click"
+                            });
+                            loadScheduleData();
+                            setDraggedItemId(null);
+                          } catch (err) {
+                            alert(`Failed to schedule item: ${err}`);
+                          }
+                        }
+                      }}
+                    >
+                      {/* Drag over highlight overlay */}
+                      {dragOverCell?.dayIdx === dayIdx && (
+                        <div 
+                          className="absolute left-0 right-0 bg-accent/20 border-2 border-accent border-dashed pointer-events-none z-20 animate-pulse"
+                          style={{
+                            top: `${dragOverCell.hourIdx * 64}px`,
+                            height: '64px'
+                          }}
+                        />
+                      )}
+
+                      {/* Background cells stack */}
+                      {Array.from({ length: 48 }, (_, slotIdx) => {
+                        const hourIdx = Math.floor(slotIdx / 2);
+                        const isHalfHour = slotIdx % 2 === 1;
+                        const hour = (7 + hourIdx) % 24;
                         const { start: slotStart, end: slotEnd } = getSlotDateTimeRange(dayDate, slotIdx);
-                        
+
                         // Check for schedule entries overlapping this time block
                         const slotEntries = entries.filter((e) => {
                           const estart = new Date(e.start_time);
@@ -234,106 +350,34 @@ export const Grid: React.FC = () => {
                         });
 
                         const hasContent = slotEntries.length > 0;
-                        const isDraggedOver = dragOverCell?.dayIdx === dayIdx && dragOverCell?.hourIdx === slotIdx;
+
+                        let blockColor = "";
+                        if (hour >= 7 && hour < 12) {
+                          blockColor = "bg-cyan-950/25 border-cyan-800/25 hover:bg-cyan-950/45";
+                        } else if (hour >= 12 && hour < 17) {
+                          blockColor = "bg-amber-950/25 border-amber-800/25 hover:bg-amber-950/45";
+                        } else if (hour >= 17 && hour < 22) {
+                          blockColor = "bg-orange-950/25 border-orange-800/25 hover:bg-orange-950/45";
+                        } else {
+                          blockColor = "bg-indigo-950/25 border-indigo-900/25 hover:bg-indigo-950/45";
+                        }
 
                         return (
                           <div 
-                            key={dayIdx}
-                            onDragEnter={(e) => {
-                              e.preventDefault();
-                              setDragOverCell({ dayIdx, hourIdx: slotIdx });
-                            }}
-                            onDragOver={(e) => {
-                              e.preventDefault();
-                              e.dataTransfer.dropEffect = "copy";
-                              setDragOverCell({ dayIdx, hourIdx: slotIdx });
-                            }}
-                            onDragLeave={() => {
-                              setDragOverCell(null);
-                            }}
-                            onDrop={async (e) => {
-                              e.preventDefault();
-                              setDragOverCell(null);
-                              const itemId = e.dataTransfer.getData("text/plain") || draggedItemId;
-                              setDraggedItemId(null);
-                              if (!itemId) return;
-
-                              try {
-                                await invoke("create_schedule", {
-                                  channelId,
-                                  mediaItemId: itemId,
-                                  startTimeIso: slotStart.toISOString(),
-                                  isLocked: true,
-                                  explanation: "Manually drag-and-drop programmed block"
-                                });
-                                loadScheduleData();
-                              } catch (err) {
-                                alert(`Failed to schedule item: ${err}`);
-                              }
-                            }}
-                            onClick={async () => {
-                              if (draggedItemId) {
-                                try {
-                                  await invoke("create_schedule", {
-                                    channelId,
-                                    mediaItemId: draggedItemId,
-                                    startTimeIso: slotStart.toISOString(),
-                                    isLocked: true,
-                                    explanation: "Manually programmed block via selection click"
-                                  });
-                                  loadScheduleData();
-                                  setDraggedItemId(null);
-                                } catch (err) {
-                                  alert(`Failed to schedule item: ${err}`);
-                                }
-                              }
-                            }}
-                            className={`flex-1 border-r border-gray-900 p-2 flex flex-col justify-between transition-all duration-150 overflow-hidden relative cursor-pointer ${blockColor}`}
+                            key={slotIdx}
+                            className={`h-[64px] shrink-0 border-b border-gray-900/50 p-2 flex flex-col justify-between transition-all duration-150 relative ${blockColor}`}
                           >
-                            {isDraggedOver && (
-                              <div className="absolute inset-0 bg-accent/20 border-2 border-accent border-dashed pointer-events-none z-20 animate-pulse" />
-                            )}
-                            <div className={`flex-1 overflow-y-auto space-y-1 pr-0.5 scrollbar-none ${draggedItemId ? "pointer-events-none" : ""}`}>
-                              {hasContent ? (
-                                slotEntries.map((e) => {
-                                  const isLocked = e.is_locked === 1;
-                                  return (
-                                    <div 
-                                      key={e.id} 
-                                      className={`p-1.5 rounded text-[10px] border leading-tight ${
-                                        isLocked 
-                                          ? "bg-cyan-950/40 border-accent/40 text-accent font-sans" 
-                                          : "bg-panel border-gray-800 text-gray-300 font-sans"
-                                      }`}
-                                      title={`${e.item_title} (${e.media_type})\nStart: ${new Date(e.start_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}\nEnd: ${new Date(e.end_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`}
-                                    >
-                                      <div className="font-bold truncate text-[10px]">{e.item_title}</div>
-                                      <div className="text-[8px] text-gray-500 flex justify-between mt-0.5 font-mono">
-                                        <span>{e.media_type.toUpperCase()}</span>
-                                        <span>{formatRuntime(e.duration)}</span>
-                                      </div>
-                                    </div>
-                                  );
-                                })
-                              ) : (
-                                <div className="h-full flex flex-col items-center justify-center text-center text-gray-700 py-1 select-none">
+                            <div className="flex-1 overflow-hidden">
+                              {!hasContent && (
+                                <div className="h-full flex flex-col items-center justify-center text-center text-gray-700 py-1 select-none pointer-events-none">
                                   <AlertCircle size={10} className="text-gray-800 mb-0.5" />
                                   <span className="text-[8px] tracking-wider font-bold">DEAD AIR GAP</span>
                                 </div>
                               )}
                             </div>
 
-                            {/* Action footer */}
-                            <div className={`flex justify-between items-center mt-1 pt-1 border-t border-gray-900/30 ${draggedItemId ? "pointer-events-none" : ""}`}>
-                              {hasContent ? (
-                                <span className="text-[8px] text-gray-600 font-mono">
-                                  {slotEntries.length} BLOCKS
-                                </span>
-                              ) : (
-                                <span className="text-[8px] text-gray-700 font-mono select-none">
-                                  STANDBY
-                                </span>
-                              )}
+                            {/* Action footer: button + ADD always aligned right. No Standby/Blocks text annotation */}
+                            <div className={`flex justify-end items-center mt-1 pt-1 border-t border-gray-900/30 ${draggedItemId ? "pointer-events-none" : ""}`}>
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -342,7 +386,7 @@ export const Grid: React.FC = () => {
                                   setSelectedSlotDate(dayDate);
                                   setIsSchedModalOpen(true);
                                 }}
-                                className="text-[8px] text-gray-500 hover:text-accent font-bold px-1 py-0.5 rounded bg-gray-900/50 border border-gray-800 hover:border-accent transition-colors pointer-events-auto"
+                                className="text-[8px] text-gray-500 hover:text-accent font-bold px-1 py-0.5 rounded bg-gray-900/50 border border-gray-800 hover:border-accent transition-colors pointer-events-auto z-10"
                               >
                                 + ADD
                               </button>
@@ -350,6 +394,46 @@ export const Grid: React.FC = () => {
                           </div>
                         );
                       })}
+
+                      {/* Absolutely positioned schedule entry cards */}
+                      <div className="absolute inset-0 pointer-events-none">
+                        {dayEntries.map((e) => {
+                          const isLocked = e.is_locked === 1;
+                          const { top, height } = getEntryPosition(e, dayStart, dayEnd);
+                          return (
+                            <div 
+                              key={e.id} 
+                              className={`absolute left-1 right-1 rounded border p-1.5 leading-tight overflow-hidden flex flex-col justify-between pointer-events-auto ${
+                                isLocked 
+                                  ? "bg-cyan-950/85 border-accent/60 text-accent font-sans shadow-[0_2px_8px_rgba(6,182,212,0.15)]" 
+                                  : "bg-panel/90 border-gray-700 text-gray-200 font-sans shadow-md"
+                              }`}
+                              style={{
+                                top: `${top}px`,
+                                height: `${Math.max(16, height - 2)}px`, // slightly smaller to show separation line/gap between contiguous items
+                                zIndex: 10,
+                              }}
+                              title={`${e.item_title} (${e.media_type})\nStart: ${new Date(e.start_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}\nEnd: ${new Date(e.end_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`}
+                            >
+                              <div className="min-w-0">
+                                <div className="font-bold truncate text-[10px]">{e.item_title}</div>
+                                <div className="text-[8px] text-gray-400 mt-0.5 flex items-center space-x-1 font-mono">
+                                  <Clock size={8} className="shrink-0" />
+                                  <span className="truncate">
+                                    {new Date(e.start_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} - {new Date(e.end_time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                  </span>
+                                </div>
+                              </div>
+                              {height >= 40 && (
+                                <div className="text-[8px] text-gray-500 flex justify-between mt-1 pt-1 border-t border-gray-800/30 font-mono">
+                                  <span className="truncate mr-1">{e.media_type.toUpperCase()}</span>
+                                  <span className="shrink-0">{formatRuntime(e.duration)}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   );
                 })}
@@ -422,7 +506,6 @@ export const Grid: React.FC = () => {
                       className={`p-2.5 bg-gray-950 border rounded cursor-pointer transition-colors text-xs flex justify-between items-center group active:scale-[0.98] select-none ${
                         isSelected ? "border-accent bg-accent/10 cyan-glow" : "border-gray-800 hover:border-accent"
                       }`}
-                      title="Drag me or click to select and schedule!"
                     >
                       <div className="truncate pr-2">
                         <div className={`font-bold truncate group-hover:text-accent ${isSelected ? "text-accent" : "text-gray-300"}`}>{details.item.title}</div>

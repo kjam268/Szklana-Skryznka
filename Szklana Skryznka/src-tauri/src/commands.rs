@@ -620,21 +620,40 @@ pub async fn set_setting(pool: DbState<'_>, key: String, value: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn purge_database(pool: DbState<'_>) -> Result<String, String> {
-    sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM media_directors").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM media_tags").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM subtitles").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM media_files").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM media_items").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM schedule_entries").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM schedules").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM playback_history").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM watchlists").execute(&*pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM settings").execute(&*pool).await.map_err(|e| e.to_string())?;
-    
-    Ok("Database successfully purged.".to_string())
+pub async fn purge_database(pool: DbState<'_>, target: String) -> Result<String, String> {
+    match target.as_str() {
+        "library" => {
+            sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_directors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_tags").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM subtitles").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_files").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_items").execute(&*pool).await.map_err(|e| e.to_string())?;
+            Ok("Library assets successfully purged.".to_string())
+        }
+        "schedule" => {
+            sqlx::query("DELETE FROM schedule_entries").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM schedules").execute(&*pool).await.map_err(|e| e.to_string())?;
+            Ok("Scheduled blocks successfully purged.".to_string())
+        }
+        "all" => {
+            sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_directors").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_tags").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM subtitles").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_files").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM media_items").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM schedule_entries").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM schedules").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM playback_history").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM watchlists").execute(&*pool).await.map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM settings").execute(&*pool).await.map_err(|e| e.to_string())?;
+            Ok("Complete database purged.".to_string())
+        }
+        _ => Err("Invalid purge target".to_string())
+    }
 }
 
 #[tauri::command]
@@ -675,4 +694,107 @@ pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::
     }
 
     Ok(results)
+}
+
+#[tauri::command]
+pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result<String, String> {
+    // 1. Fetch item title, year, and media_type from database
+    let item: crate::models::MediaItem = sqlx::query_as::<_, crate::models::MediaItem>(
+        "SELECT * FROM media_items WHERE id = $1"
+    )
+    .bind(&item_id)
+    .fetch_one(&*pool)
+    .await
+    .map_err(|e| format!("Failed to find media item: {}", e))?;
+
+    // 2. Fetch TMDb API Key from settings
+    let api_key: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'tmdb_api_key'"
+    )
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None);
+
+    // 3. Fetch online metadata
+    let mut online = crate::scanner::fetch_online_metadata(&item.title, item.year, &item.media_type, api_key.clone()).await;
+
+    // Fallback logic from scanner
+    if online.poster_path.is_none() && item.media_type == "Movie" {
+        if let Ok(Some(ref_row)) = sqlx::query(
+            "SELECT synopsis, rating, poster_path, director, cast_actors FROM all_movies WHERE title = $1 LIMIT 1"
+        )
+        .bind(&item.title)
+        .fetch_optional(&*pool)
+        .await {
+            let synopsis: String = ref_row.get("synopsis");
+            let rating: f64 = ref_row.get("rating");
+            let poster_path: Option<String> = ref_row.get("poster_path");
+            let director: String = ref_row.get("director");
+            let cast_actors: String = ref_row.get("cast_actors");
+
+            online.synopsis = synopsis;
+            online.rating = rating;
+            online.poster_path = poster_path;
+            if !director.is_empty() {
+                online.directors = vec![director];
+            }
+            if !cast_actors.is_empty() {
+                online.cast = cast_actors.split(", ").map(|s| s.to_string()).collect();
+            }
+        }
+    }
+
+    // 4. Update MediaItem in database
+    sqlx::query(
+        "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, updated_at = $6 \
+         WHERE id = $7"
+    )
+    .bind(&item.title)
+    .bind(&online.synopsis)
+    .bind(online.rating)
+    .bind(&online.poster_path)
+    .bind(&online.backdrop_path)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&item_id)
+    .execute(&*pool)
+    .await
+    .map_err(|e| format!("Failed to update media item: {}", e))?;
+
+    // 5. Refresh genres
+    sqlx::query("DELETE FROM media_genres WHERE media_item_id = $1").bind(&item_id).execute(&*pool).await.map_err(|e| e.to_string())?;
+    for genre_name in &online.genres {
+        let mut genre_id: Option<String> = sqlx::query_scalar("SELECT id FROM genres WHERE name = $1").bind(genre_name).fetch_optional(&*pool).await.map_err(|e| e.to_string())?;
+        if genre_id.is_none() {
+            let new_id = format!("gen_{}", uuid::Uuid::new_v4());
+            sqlx::query("INSERT INTO genres (id, name) VALUES ($1, $2)").bind(&new_id).bind(genre_name).execute(&*pool).await.map_err(|e| e.to_string())?;
+            genre_id = Some(new_id);
+        }
+        sqlx::query("INSERT INTO media_genres (media_item_id, genre_id) VALUES ($1, $2)").bind(&item_id).bind(genre_id.unwrap()).execute(&*pool).await.map_err(|e| e.to_string())?;
+    }
+
+    // 6. Refresh directors
+    sqlx::query("DELETE FROM media_directors WHERE media_item_id = $1").bind(&item_id).execute(&*pool).await.map_err(|e| e.to_string())?;
+    for dir_name in &online.directors {
+        let mut dir_id: Option<String> = sqlx::query_scalar("SELECT id FROM directors WHERE name = $1").bind(dir_name).fetch_optional(&*pool).await.map_err(|e| e.to_string())?;
+        if dir_id.is_none() {
+            let new_id = format!("dir_{}", uuid::Uuid::new_v4());
+            sqlx::query("INSERT INTO directors (id, name) VALUES ($1, $2)").bind(&new_id).bind(dir_name).execute(&*pool).await.map_err(|e| e.to_string())?;
+            dir_id = Some(new_id);
+        }
+        sqlx::query("INSERT INTO media_directors (media_item_id, director_id) VALUES ($1, $2)").bind(&item_id).bind(dir_id.unwrap()).execute(&*pool).await.map_err(|e| e.to_string())?;
+    }
+
+    // 7. Refresh cast actors
+    sqlx::query("DELETE FROM media_actors WHERE media_item_id = $1").bind(&item_id).execute(&*pool).await.map_err(|e| e.to_string())?;
+    for act_name in &online.cast {
+        let mut act_id: Option<String> = sqlx::query_scalar("SELECT id FROM actors WHERE name = $1").bind(act_name).fetch_optional(&*pool).await.map_err(|e| e.to_string())?;
+        if act_id.is_none() {
+            let new_id = format!("act_{}", uuid::Uuid::new_v4());
+            sqlx::query("INSERT INTO actors (id, name) VALUES ($1, $2)").bind(&new_id).bind(act_name).execute(&*pool).await.map_err(|e| e.to_string())?;
+            act_id = Some(new_id);
+        }
+        sqlx::query("INSERT INTO media_actors (media_item_id, actor_id) VALUES ($1, $2)").bind(&item_id).bind(act_id.unwrap()).execute(&*pool).await.map_err(|e| e.to_string())?;
+    }
+
+    Ok("Metadata successfully refreshed from online API".to_string())
 }

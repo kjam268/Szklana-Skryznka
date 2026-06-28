@@ -56,6 +56,7 @@ pub struct MediaFile {
     pub frame_rate: Option<f64>,
     pub audio_channels: Option<i32>,
     pub audio_language: Option<String>,
+    pub quality_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

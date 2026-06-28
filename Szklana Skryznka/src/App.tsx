@@ -12,53 +12,7 @@ function App() {
   const [isBooted, setIsBooted] = useState(false);
   const [activeTab, setActiveTab] = useState("onair");
 
-  useEffect(() => {
-    let unlistenKey: any;
-    let unlistenPurge: any;
 
-    const setupListeners = async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      
-      unlistenKey = await listen("menu-set-api-key", async () => {
-        const key = prompt("Enter TMDb API Key:");
-        if (key !== null) {
-          try {
-            const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("set_setting", { key: "tmdb_api_key", value: key });
-            alert("TMDb API Key configured successfully!");
-            window.location.reload();
-          } catch (e) {
-            alert(`Failed: ${e}`);
-          }
-        }
-      });
-
-      unlistenPurge = await listen("menu-purge-database", async () => {
-        const password = prompt("Enter Admin Password to Purge Database:");
-        if (password === "4dmin123") {
-          if (confirm("Are you absolutely sure you want to PURGE the entire library, schedules, history, and settings? This cannot be undone.")) {
-            try {
-              const { invoke } = await import("@tauri-apps/api/core");
-              await invoke("purge_database");
-              alert("Library and database successfully purged. Reloading...");
-              window.location.reload();
-            } catch (e) {
-              alert(`Purge failed: ${e}`);
-            }
-          }
-        } else if (password !== null) {
-          alert("Access Denied: Incorrect Password.");
-        }
-      });
-    };
-
-    setupListeners();
-
-    return () => {
-      if (unlistenKey) unlistenKey();
-      if (unlistenPurge) unlistenPurge();
-    };
-  }, []);
 
   // Show splash screen on boot sequence
   if (!isBooted) {

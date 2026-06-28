@@ -5,7 +5,15 @@ import { Play, Pause, Volume2, Maximize2, Tv, Clock, Eye, AlertTriangle } from "
 
 export const OnAir: React.FC = () => {
   const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
-  const { volume, setVolume, isFullscreen, setFullscreen } = usePlayerStore();
+  const { volume, setVolume, isFullscreen, setFullscreen, isPlaying, setPlaying } = usePlayerStore();
+  
+  const getPosterUrl = (path?: string) => {
+    if (!path) return "";
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      return path;
+    }
+    return convertFileSrc(path);
+  };
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hoveredItem, setHoveredItem] = useState<ScheduleEntryDetails | null>(null);
@@ -62,9 +70,14 @@ export const OnAir: React.FC = () => {
       }
       
       // Auto play
-      videoRef.current.play().catch((err) => {
-        console.warn("Autoplay blocked by browser policy: ", err);
-      });
+      videoRef.current.play()
+        .then(() => setPlaying(true))
+        .catch((err) => {
+          console.warn("Autoplay blocked by browser policy: ", err);
+          setPlaying(false);
+        });
+    } else {
+      setPlaying(false);
     }
   }, [playoutState?.active_entry?.id]);
 
@@ -163,7 +176,7 @@ export const OnAir: React.FC = () => {
             <div className="flex items-center space-x-4 w-full">
               {hoveredItem.poster_path ? (
                 <img 
-                  src={convertFileSrc(hoveredItem.poster_path)} 
+                  src={getPosterUrl(hoveredItem.poster_path)} 
                   alt="Poster" 
                   className="w-16 h-24 object-cover rounded border border-gray-700 bg-gray-900"
                 />
@@ -203,17 +216,39 @@ export const OnAir: React.FC = () => {
         {/* Professional Video Playout Box */}
         <div className="aspect-video w-full bg-black rounded-lg border border-gray-800 relative overflow-hidden flex items-center justify-center group shadow-2xl">
           {activeEntry?.file_path ? (
-            <video
-              ref={videoRef}
-              src={convertFileSrc(activeEntry.file_path)}
-              className="w-full h-full object-contain"
-              volume={volume}
-              onEnded={() => {
-                // Instantly sync next program
-                const channelId = channels[0]?.id || "chan_default";
-                fetchPlayoutState(channelId, new Date().toISOString());
-              }}
-            />
+            <>
+              <video
+                ref={videoRef}
+                src={convertFileSrc(activeEntry.file_path)}
+                className="w-full h-full object-contain"
+                volume={volume}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={() => {
+                  // Instantly sync next program
+                  const channelId = channels[0]?.id || "chan_default";
+                  fetchPlayoutState(channelId, new Date().toISOString());
+                }}
+              />
+              {!isPlaying && (
+                <div 
+                  onClick={() => {
+                    if (videoRef.current) {
+                      videoRef.current.play()
+                        .then(() => setPlaying(true))
+                        .catch((err) => console.warn("Playout activation failed:", err));
+                    }
+                  }}
+                  className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center cursor-pointer z-30 space-y-2 hover:bg-black/60 transition-colors pointer-events-auto"
+                >
+                  <div className="text-onair text-xs font-bold tracking-widest animate-pulse border border-onair/30 px-4 py-2 rounded bg-black/80 flex items-center space-x-2">
+                    <Play size={14} className="fill-onair" />
+                    <span>START MONITOR FEED (CLICK TO SYNC)</span>
+                  </div>
+                  <div className="text-[9px] text-gray-500 font-mono">Autoplay policy requires user activation.</div>
+                </div>
+              )}
+            </>
           ) : (
             // STATION STANDBY: SMPTE Color Bars
             <div className="w-full h-full relative flex flex-col justify-between p-8 font-mono bg-zinc-900 border border-zinc-800 overflow-hidden">

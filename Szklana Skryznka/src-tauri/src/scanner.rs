@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, Row};
 use serde_json::Value;
 use tracing::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -195,75 +195,130 @@ pub async fn fetch_online_metadata(
 ) -> OnlineMetadata {
     // 1. Try TMDb first if API key is provided
     if let Some(key) = api_key {
-        if !key.trim().is_empty() {
-            let client = reqwest::Client::new();
+        let key_trimmed = key.trim();
+        if !key_trimmed.is_empty() {
+            let client = reqwest::Client::builder()
+                .user_agent("SzklanaSkryznka/1.0")
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            
             let query_type = if media_type == "TVShow" || media_type == "Episode" || media_type == "Anime" { "tv" } else { "movie" };
             let year_param = if let Some(y) = year { format!("&year={}", y) } else { "".to_string() };
             
-            let search_url = format!(
-                "https://api.themoviedb.org/3/search/{}?api_key={}&query={}{}",
-                query_type, key, urlencode(title), year_param
-            );
+            let is_v4 = key_trimmed.len() > 45;
+            
+            let search_url = if is_v4 {
+                format!(
+                    "https://api.themoviedb.org/3/search/{}?query={}{}",
+                    query_type, urlencode(title), year_param
+                )
+            } else {
+                format!(
+                    "https://api.themoviedb.org/3/search/{}?api_key={}&query={}{}",
+                    query_type, key_trimmed, urlencode(title), year_param
+                )
+            };
 
-            if let Ok(res) = client.get(&search_url).send().await {
-                if let Ok(parsed) = res.json::<Value>().await {
-                    if let Some(results) = parsed["results"].as_array() {
-                        if !results.is_empty() {
-                            let first = &results[0];
-                            let id = first["id"].as_i64().unwrap_or(0);
-                            let synopsis = first["overview"].as_str().unwrap_or("").to_string();
-                            let rating = first["vote_average"].as_f64().unwrap_or(7.0);
-                            let poster = first["poster_path"].as_str().map(|p| format!("https://image.tmdb.org/t/p/w500{}", p));
-                            let backdrop = first["backdrop_path"].as_str().map(|b| format!("https://image.tmdb.org/t/p/original{}", b));
+            let mut req = client.get(&search_url);
+            if is_v4 {
+                req = req.header("Authorization", format!("Bearer {}", key_trimmed));
+            }
 
-                            let detail_url = format!(
-                                "https://api.themoviedb.org/3/{}/{}?api_key={}&append_to_response=credits",
-                                query_type, id, key
-                            );
-                            
-                            let mut directors = Vec::new();
-                            let mut cast = Vec::new();
-                            let mut genres = Vec::new();
+            match req.send().await {
+                Ok(res) => {
+                    let status = res.status();
+                    if !status.is_success() {
+                        eprintln!("TMDb search API error status: {}", status);
+                    }
+                    match res.json::<Value>().await {
+                        Ok(parsed) => {
+                            if let Some(results) = parsed["results"].as_array() {
+                                if !results.is_empty() {
+                                    let first = &results[0];
+                                    let id = first["id"].as_i64().unwrap_or(0);
+                                    let synopsis = first["overview"].as_str().unwrap_or("").to_string();
+                                    let rating = first["vote_average"].as_f64().unwrap_or(7.0);
+                                    let poster = first["poster_path"].as_str().map(|p| format!("https://image.tmdb.org/t/p/w500{}", p));
+                                    let backdrop = first["backdrop_path"].as_str().map(|b| format!("https://image.tmdb.org/t/p/original{}", b));
 
-                            if let Ok(detail_res) = client.get(&detail_url).send().await {
-                                if let Ok(detail_parsed) = detail_res.json::<Value>().await {
-                                    if let Some(genres_arr) = detail_parsed["genres"].as_array() {
-                                        for g in genres_arr {
-                                            if let Some(name) = g["name"].as_str() {
-                                                genres.push(name.to_string());
-                                            }
-                                        }
+                                    let detail_url = if is_v4 {
+                                        format!(
+                                            "https://api.themoviedb.org/3/{}/{}?append_to_response=credits",
+                                            query_type, id
+                                        )
+                                    } else {
+                                        format!(
+                                            "https://api.themoviedb.org/3/{}/{}?api_key={}&append_to_response=credits",
+                                            query_type, id, key_trimmed
+                                        )
+                                    };
+                                    
+                                    let mut detail_req = client.get(&detail_url);
+                                    if is_v4 {
+                                        detail_req = detail_req.header("Authorization", format!("Bearer {}", key_trimmed));
                                     }
-                                    if let Some(crew) = detail_parsed["credits"]["crew"].as_array() {
-                                        for c in crew {
-                                            if c["job"].as_str() == Some("Director") {
-                                                if let Some(name) = c["name"].as_str() {
-                                                    directors.push(name.to_string());
+
+                                    let mut directors = Vec::new();
+                                    let mut cast = Vec::new();
+                                    let mut genres = Vec::new();
+
+                                    match detail_req.send().await {
+                                        Ok(detail_res) => {
+                                            let detail_status = detail_res.status();
+                                            if !detail_status.is_success() {
+                                                eprintln!("TMDb detail API error status: {}", detail_status);
+                                            }
+                                            match detail_res.json::<Value>().await {
+                                                Ok(detail_parsed) => {
+                                                    if let Some(genres_arr) = detail_parsed["genres"].as_array() {
+                                                        for g in genres_arr {
+                                                            if let Some(name) = g["name"].as_str() {
+                                                                genres.push(name.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                    if let Some(crew) = detail_parsed["credits"]["crew"].as_array() {
+                                                        for c in crew {
+                                                            if c["job"].as_str() == Some("Director") {
+                                                                if let Some(name) = c["name"].as_str() {
+                                                                    directors.push(name.to_string());
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if let Some(cast_arr) = detail_parsed["credits"]["cast"].as_array() {
+                                                        for c in cast_arr.iter().take(5) {
+                                                            if let Some(name) = c["name"].as_str() {
+                                                                cast.push(name.to_string());
+                                                            }
+                                                        }
+                                                    }
                                                 }
+                                                Err(e) => eprintln!("TMDb detail JSON parse error: {}", e),
                                             }
                                         }
+                                        Err(e) => eprintln!("TMDb detail network error: {}", e),
                                     }
-                                    if let Some(cast_arr) = detail_parsed["credits"]["cast"].as_array() {
-                                        for c in cast_arr.iter().take(5) {
-                                            if let Some(name) = c["name"].as_str() {
-                                                cast.push(name.to_string());
-                                            }
-                                        }
-                                    }
+
+                                    return OnlineMetadata {
+                                        synopsis: if synopsis.is_empty() { "No description available.".to_string() } else { synopsis },
+                                        rating,
+                                        poster_path: poster,
+                                        backdrop_path: backdrop,
+                                        directors,
+                                        cast,
+                                        genres,
+                                    };
+                                } else {
+                                    eprintln!("TMDb search returned no results for title: {}", title);
                                 }
                             }
-
-                            return OnlineMetadata {
-                                synopsis: if synopsis.is_empty() { "No description available.".to_string() } else { synopsis },
-                                rating,
-                                poster_path: poster,
-                                backdrop_path: backdrop,
-                                directors,
-                                cast,
-                                genres,
-                            };
                         }
+                        Err(e) => eprintln!("TMDb search JSON parse error: {}", e),
                     }
+                }
+                Err(e) => {
+                    eprintln!("TMDb search request failed: {}", e);
                 }
             }
         }
@@ -504,6 +559,51 @@ pub fn extract_metadata(path: &Path) -> (
     (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language)
 }
 
+fn clean_filename(filename: &str) -> (String, Option<i32>) {
+    let re_year_bound = regex::Regex::new(r"^(.*?\b(19\d{2}|20\d{2})\b)").unwrap();
+    
+    let mut title = filename.to_string();
+    let mut year = None;
+
+    if let Some(caps) = re_year_bound.captures(filename) {
+        let matched_part = caps.get(1).unwrap().as_str();
+        
+        let re_year = regex::Regex::new(r"\b(19\d{2}|20\d{2})\b").unwrap();
+        title = re_year.replace_all(matched_part, " ").into_owned();
+        title = title.replace('.', " ").replace('_', " ");
+        
+        if let Some(y_cap) = re_year.captures(matched_part) {
+            if let Some(y_match) = y_cap.get(1) {
+                if let Ok(y_val) = y_match.as_str().parse::<i32>() {
+                    year = Some(y_val);
+                }
+            }
+        }
+    } else {
+        title = title.replace('.', " ").replace('_', " ");
+    }
+
+    let mut cleaned_title = String::new();
+    let chars: Vec<char> = title.chars().collect();
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c.is_alphanumeric() || c.is_whitespace() {
+            cleaned_title.push(c);
+        } else {
+            let prev_is_word = i > 0 && chars[i-1].is_alphanumeric();
+            let next_is_word = i + 1 < chars.len() && chars[i+1].is_alphanumeric();
+            if prev_is_word || next_is_word {
+                cleaned_title.push(c);
+            }
+        }
+    }
+
+    let re_spaces = regex::Regex::new(r"\s+").unwrap();
+    let final_title = re_spaces.replace_all(&cleaned_title, " ").trim().to_string();
+
+    (final_title, year)
+}
+
 /// Parse filename to retrieve Title, Year, and Media Type
 pub fn parse_filename(path: &Path) -> (String, Option<i32>, String) {
     let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown");
@@ -532,44 +632,158 @@ pub fn parse_filename(path: &Path) -> (String, Option<i32>, String) {
         "Movie".to_string()
     };
 
-    // Extract year (simple 4-digit search between 1900 and 2100)
-    let mut year = None;
-    let words: Vec<&str> = filename.split(|c: char| !c.is_alphanumeric()).collect();
-    for word in words {
-        if word.len() == 4 {
-            if let Ok(y) = word.parse::<i32>() {
-                if y >= 1900 && y <= 2100 {
-                    year = Some(y);
-                    break;
-                }
-            }
+    let (mut title, year) = clean_filename(filename);
+
+    // Clean up common video metadata tags in title
+    let tags_to_remove = [
+        "1080p", "720p", "4k", "2160p", "bluray", "h264", "h265", "x264", "x265",
+        "web-dl", "webrip", "aac", "dts", "dd5.1", "yify", "rarbg", "hevc", "remux"
+    ];
+    for tag in tags_to_remove {
+        title = title.replace(tag, "");
+        title = title.replace(&tag.to_uppercase(), "");
+    }
+    title = title.trim().to_string();
+
+    if title.is_empty() {
+        title = filename.to_string();
+    }
+
+    (title, year, media_type)
+}
+
+pub fn calculate_quality_score(
+    resolution: &str,
+    video_bitrate: Option<i64>,
+    audio_channels: Option<i32>,
+    video_codec: &str,
+    audio_codec: &str,
+) -> f64 {
+    let mut score: f64 = 0.0;
+
+    // 1. Resolution Score (max 4.0 points)
+    score += match resolution {
+        "4K" => 4.0,
+        "1080p" => 3.0,
+        "720p" => 2.0,
+        _ => 1.0,
+    };
+
+    // 2. Video Bitrate Score (max 3.0 points)
+    if let Some(bitrate) = video_bitrate {
+        if bitrate > 20_000_000 {
+            score += 3.0;
+        } else if bitrate > 8_000_000 {
+            score += 2.0;
+        } else if bitrate > 2_000_000 {
+            score += 1.5;
+        } else if bitrate > 500_000 {
+            score += 1.0;
+        } else {
+            score += 0.5;
+        }
+    } else {
+        score += 1.5;
+    }
+
+    // 3. Audio Quality Score (max 2.0 points)
+    if let Some(channels) = audio_channels {
+        if channels >= 6 {
+            score += 1.5;
+        } else if channels >= 2 {
+            score += 1.0;
+        } else {
+            score += 0.5;
+        }
+    } else {
+        score += 1.0;
+    }
+
+    let ac = audio_codec.to_lowercase();
+    if ac.contains("dts") || ac.contains("truehd") || ac.contains("atmos") {
+        score += 0.5;
+    } else if ac.contains("aac") || ac.contains("ac3") || ac.contains("eac3") {
+        score += 0.3;
+    }
+
+    // 4. Video Codec efficiency bonus (max 1.0 points)
+    let vc = video_codec.to_lowercase();
+    if vc.contains("hevc") || vc.contains("h265") || vc.contains("av1") {
+        score += 1.0;
+    } else if vc.contains("h264") || vc.contains("x264") {
+        score += 0.5;
+    }
+
+    if score > 10.0 {
+        score = 10.0;
+    }
+    
+    (score * 10.0).round() / 10.0
+}
+
+pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("Running database de-duplication pass...");
+    
+    // 1. Populate quality_score for any existing files that have NULL
+    let unresolved_files = sqlx::query(
+        "SELECT id, resolution, video_bitrate, audio_channels, video_codec, audio_codec FROM media_files WHERE quality_score IS NULL"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for row in unresolved_files {
+        let file_id: String = row.get("id");
+        let resolution: String = row.get("resolution");
+        let video_bitrate: Option<i64> = row.get("video_bitrate");
+        let audio_channels: Option<i32> = row.get("audio_channels");
+        let video_codec: String = row.get("video_codec");
+        let audio_codec: String = row.get("audio_codec");
+
+        let score = calculate_quality_score(
+            &resolution,
+            video_bitrate,
+            audio_channels,
+            &video_codec,
+            &audio_codec,
+        );
+
+        sqlx::query("UPDATE media_files SET quality_score = $1 WHERE id = $2")
+            .bind(score)
+            .bind(&file_id)
+            .execute(pool)
+            .await?;
+    }
+
+    // 2. Query all media items that have multiple files
+    let duplicate_items: Vec<String> = sqlx::query_scalar(
+        "SELECT media_item_id FROM media_files GROUP BY media_item_id HAVING COUNT(*) > 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for item_id in duplicate_items {
+        let files = sqlx::query(
+            "SELECT id, quality_score FROM media_files WHERE media_item_id = $1 ORDER BY quality_score DESC"
+        )
+        .bind(&item_id)
+        .fetch_all(pool)
+        .await?;
+
+        if files.len() > 1 {
+            let best_file_id: String = files[0].get("id");
+            let best_score: f64 = files[0].get("quality_score");
+
+            info!("De-duplicating item_id {}: Keeping file {} (score {}), deleting others", item_id, best_file_id, best_score);
+
+            sqlx::query("DELETE FROM media_files WHERE media_item_id = $1 AND id != $2")
+                .bind(&item_id)
+                .bind(&best_file_id)
+                .execute(pool)
+                .await?;
         }
     }
 
-    // Clean up title (remove year, brackets, extensions details)
-    let mut clean_title = filename.to_string();
-    if let Some(y) = year {
-        let year_str = y.to_string();
-        clean_title = clean_title.replace(&year_str, "");
-    }
-    
-    // Clean up common video metadata tags in filenames
-    let tags_to_remove = [
-        "1080p", "720p", "4k", "2160p", "bluray", "h264", "h265", "x264", "x265",
-        "web-dl", "webrip", "aac", "dts", "dd5.1", "yify", "rarbg", "hevc", "remux",
-        "[]", "()", " - ", "  "
-    ];
-    for tag in tags_to_remove {
-        clean_title = clean_title.replace(tag, "");
-        clean_title = clean_title.replace(&tag.to_uppercase(), "");
-    }
-    
-    clean_title = clean_title.trim_matches(|c: char| !c.is_alphanumeric()).trim().to_string();
-    if clean_title.is_empty() {
-        clean_title = filename.to_string();
-    }
-
-    (clean_title, year, media_type)
+    Ok(())
 }
 
 use tauri::Emitter;
@@ -586,6 +800,11 @@ pub async fn scan_directory(
     }
 
     info!("Starting scan of library directory: {}", dir_path);
+
+    // Run de-duplication pass
+    if let Err(e) = deduplicate_database(pool).await {
+        warn!("Database de-duplication failed: {}", e);
+    }
 
     // 1. Check if TMDb API key is set in Settings
     let api_key: Option<String> = sqlx::query_scalar(
@@ -655,7 +874,7 @@ pub async fn scan_directory(
         let file_size = fs::metadata(&path)?.len() as i64;
 
         // Determine if matching MediaItem already exists (same title, year, and media_type)
-        let mut item_id: Option<String> = sqlx::query_scalar(
+        let item_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM media_items WHERE title = $1 AND year IS $2 AND media_type = $3 LIMIT 1"
         )
         .bind(&title)
@@ -664,9 +883,77 @@ pub async fn scan_directory(
         .fetch_optional(pool)
         .await?;
 
-        if item_id.is_none() {
+        let mut should_insert_file = true;
+        let item_id_val = if let Some(existing_item_id) = item_id {
+            // Check existing files for this item and compare quality scores
+            let existing_files = sqlx::query(
+                "SELECT id, quality_score FROM media_files WHERE media_item_id = $1"
+            )
+            .bind(&existing_item_id)
+            .fetch_all(pool)
+            .await?;
+
+            let new_score = calculate_quality_score(
+                &resolution,
+                video_bitrate,
+                audio_channels,
+                &video_codec,
+                &audio_codec,
+            );
+
+            let mut higher_quality_found = false;
+            for f in &existing_files {
+                let existing_score: f64 = f.get::<Option<f64>, _>("quality_score").unwrap_or(0.0);
+                if existing_score >= new_score {
+                    higher_quality_found = true;
+                    break;
+                }
+            }
+
+            if higher_quality_found {
+                // Database already has equal/higher quality, skip this file
+                should_insert_file = false;
+                duplicate_count += 1;
+            } else {
+                // New file is higher quality! Delete lower quality ones
+                for f in &existing_files {
+                    let file_id: String = f.get("id");
+                    sqlx::query("DELETE FROM media_files WHERE id = $1")
+                        .bind(file_id)
+                        .execute(pool)
+                        .await?;
+                }
+            }
+            existing_item_id
+        } else {
             // Fetch metadata online (TMDb / Fallback maps)
-            let online = fetch_online_metadata(&title, year, &media_type, api_key.clone()).await;
+            let mut online = fetch_online_metadata(&title, year, &media_type, api_key.clone()).await;
+
+            // Local reference database fallback if TMDb did not return a poster
+            if online.poster_path.is_none() && media_type == "Movie" {
+                if let Ok(Some(ref_row)) = sqlx::query(
+                    "SELECT synopsis, rating, poster_path, director, cast_actors FROM all_movies WHERE title = $1 LIMIT 1"
+                )
+                .bind(&title)
+                .fetch_optional(pool)
+                .await {
+                    let synopsis: String = ref_row.get("synopsis");
+                    let rating: f64 = ref_row.get("rating");
+                    let poster_path: Option<String> = ref_row.get("poster_path");
+                    let director: String = ref_row.get("director");
+                    let cast_actors: String = ref_row.get("cast_actors");
+
+                    online.synopsis = synopsis;
+                    online.rating = rating;
+                    online.poster_path = poster_path;
+                    if !director.is_empty() {
+                        online.directors = vec![director];
+                    }
+                    if !cast_actors.is_empty() {
+                        online.cast = cast_actors.split(", ").map(|s| s.to_string()).collect();
+                    }
+                }
+            }
 
             // Create a new MediaItem
             let new_item_id = format!("item_{}", uuid::Uuid::new_v4());
@@ -759,34 +1046,43 @@ pub async fn scan_directory(
                     .await?;
             }
 
-            item_id = Some(new_item_id);
+            new_item_id
+        };
+
+        if should_insert_file {
+            let quality_score = calculate_quality_score(
+                &resolution,
+                video_bitrate,
+                audio_channels,
+                &video_codec,
+                &audio_codec,
+            );
+
+            // Create MediaFile entry containing advanced video and audio stream details
+            let file_id = format!("file_{}", uuid::Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO media_files (id, media_item_id, file_path, file_size, checksum, video_codec, audio_codec, resolution, duration, video_bitrate, frame_rate, audio_channels, audio_language, quality_score) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
+            )
+            .bind(&file_id)
+            .bind(&item_id_val)
+            .bind(&file_path_str)
+            .bind(file_size)
+            .bind(&checksum)
+            .bind(&video_codec)
+            .bind(&audio_codec)
+            .bind(&resolution)
+            .bind(duration)
+            .bind(video_bitrate)
+            .bind(frame_rate)
+            .bind(audio_channels)
+            .bind(&audio_language)
+            .bind(quality_score)
+            .execute(pool)
+            .await?;
+
+            scanned_count += 1;
         }
-
-        let item_id_val = item_id.unwrap();
-
-        // Create MediaFile entry containing advanced video and audio stream details
-        let file_id = format!("file_{}", uuid::Uuid::new_v4());
-        sqlx::query(
-            "INSERT INTO media_files (id, media_item_id, file_path, file_size, checksum, video_codec, audio_codec, resolution, duration, video_bitrate, frame_rate, audio_channels, audio_language) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        )
-        .bind(&file_id)
-        .bind(&item_id_val)
-        .bind(&file_path_str)
-        .bind(file_size)
-        .bind(&checksum)
-        .bind(&video_codec)
-        .bind(&audio_codec)
-        .bind(&resolution)
-        .bind(duration)
-        .bind(video_bitrate)
-        .bind(frame_rate)
-        .bind(audio_channels)
-        .bind(&audio_language)
-        .execute(pool)
-        .await?;
-
-        scanned_count += 1;
 
         // Auto-associate subtitles
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");

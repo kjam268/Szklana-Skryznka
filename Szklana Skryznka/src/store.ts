@@ -28,6 +28,7 @@ export interface MediaFile {
   audio_codec?: string;
   resolution?: string;
   duration: number;
+  quality_score?: number;
 }
 
 export interface Subtitle {
@@ -215,7 +216,13 @@ export const useScheduleStore = create<ScheduleStore>((set) => ({
     try {
       const profile = useScheduleStore.getState().selectedProfile;
       const policy = useScheduleStore.getState().selectedPolicy;
-      await invoke("start_channel", { channelId, profileName: profile, startTimeIso: startIso, endTimeIso: endIso, policy });
+      await invoke("start_channel", { 
+        channelId, 
+        profileName: profile, 
+        startTimeIso: startIso, 
+        endTimeIso: endIso, 
+        policy 
+      });
       set({ isLoading: false });
     } catch (e) {
       console.error(e);
@@ -224,10 +231,21 @@ export const useScheduleStore = create<ScheduleStore>((set) => ({
     }
   },
   addEntry: async (channelId, itemId, startIso, locked, explanation) => {
-    await invoke("create_schedule", { channelId, mediaItemId: itemId, startTimeIso: startIso, isLocked: locked, explanation });
+    await invoke("create_schedule", { 
+      channelId, 
+      mediaItemId: itemId, 
+      startTimeIso: startIso, 
+      isLocked: locked, 
+      explanation 
+    });
   },
   updateEntry: async (entryId, startIso, endIso, locked) => {
-    await invoke("update_schedule", { entryId, startTimeIso: startIso, endTimeIso: endIso, isLocked: locked });
+    await invoke("update_schedule", { 
+      entryId, 
+      startTimeIso: startIso, 
+      endTimeIso: endIso, 
+      isLocked: locked 
+    });
   },
 }));
 
@@ -298,7 +316,7 @@ export const useChannelStore = create<ChannelStore>((set) => ({
   fetchPlayoutState: async (channelId, currentIso) => {
     set({ isLoading: true });
     try {
-      const playoutState = await invoke<PlayoutState>("get_current_program", { channelId, current_time_iso: currentIso });
+      const playoutState = await invoke<PlayoutState>("get_current_program", { channelId, currentTimeIso: currentIso });
       set({ playoutState, isLoading: false });
     } catch (e) {
       console.error(e);

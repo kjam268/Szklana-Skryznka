@@ -33,6 +33,9 @@ export const DatabaseViewer: React.FC = () => {
       genres: details.genres.join(", "),
       files_count: details.files.length,
       subtitles_count: details.subtitles.length,
+      quality_score: details.files[0]?.quality_score !== undefined && details.files[0]?.quality_score !== null
+        ? `${details.files[0].quality_score.toFixed(1)} / 10.0`
+        : "N/A",
     }));
     setRowData(mapped);
   }, [items]);
@@ -49,6 +52,7 @@ export const DatabaseViewer: React.FC = () => {
     { field: "runtime", headerName: "RUNTIME (SEC)", width: 120, editable: true },
     { field: "rating", headerName: "RATING", width: 90, editable: true },
     { field: "genres", headerName: "GENRES", width: 140, editable: true },
+    { field: "quality_score", headerName: "QUALITY", width: 100, editable: false },
     { field: "files_count", headerName: "FILES", width: 80, editable: false },
     { field: "subtitles_count", headerName: "SUBS", width: 80, editable: false },
   ];

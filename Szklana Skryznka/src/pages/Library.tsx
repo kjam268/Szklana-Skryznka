@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, MediaItemDetails, Subtitle } from "../store";
-import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen } from "lucide-react";
+import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -10,9 +10,12 @@ export const Library: React.FC = () => {
   } = useLibraryStore();
 
   const [selectedItem, setSelectedItem] = useState<MediaItemDetails | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [scanPath, setScanPath] = useState("");
   const [selectedTagFilter, setSelectedTagFilter] = useState("All");
-  const [editTag, setEditTag] = useState("None");
+  const [editTags, setEditTags] = useState<string[]>([]);
+  const [isTagsDropdownOpen, setIsTagsDropdownOpen] = useState(false);
+  const availableTags = ["Favorites", "Kids", "Late Night", "Classic", "Must Watch", "Holiday"];
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -83,7 +86,7 @@ export const Library: React.FC = () => {
     setEditPoster(details.item.poster_path || "");
     setEditBackdrop(details.item.backdrop_path || "");
     setEditGenres(details.genres.join(", "));
-    setEditTag(details.tags[0] || "None");
+    setEditTags(details.tags);
   };
 
   const handleSaveMetadata = async () => {
@@ -102,7 +105,7 @@ export const Library: React.FC = () => {
         backdrop_path: editBackdrop,
       },
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
-      tags: editTag !== "None" ? [editTag] : [],
+      tags: editTags,
     };
     await saveMetadata(updated);
     setSelectedItem(updated);
@@ -153,6 +156,14 @@ export const Library: React.FC = () => {
 
   const mediaTypes = ["All", "Movie", "TVShow", "Episode", "Anime", "Documentary", "Educational", "Bumper", "StationID", "Trailer"];
 
+  const getPosterUrl = (path?: string) => {
+    if (!path) return "";
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      return path;
+    }
+    return convertFileSrc(path);
+  };
+
   return (
     <div className="flex-1 h-screen flex bg-background text-gray-200 font-mono overflow-hidden">
       {/* MAIN CONTAINER */}
@@ -165,19 +176,6 @@ export const Library: React.FC = () => {
               <span>THE LIBRARY</span>
             </span>
             <div className="flex items-center space-x-3">
-              {/* TMDB API Key settings input */}
-              <div className="flex items-center space-x-1.5 bg-gray-900 border border-gray-800 rounded px-2.5 py-1">
-                <Settings size={12} className="text-gray-500 animate-pulse" />
-                <span className="text-[9px] text-gray-500 font-bold uppercase tracking-wider">TMDb KEY:</span>
-                <input
-                  type="password"
-                  placeholder="No key (using TVmaze/MAL fallback)"
-                  value={tmdbApiKey}
-                  onChange={(e) => handleSaveTmdbKey(e.target.value)}
-                  className="bg-transparent text-[10px] text-accent font-bold w-40 focus:outline-none placeholder-gray-700 font-mono"
-                />
-              </div>
-
               <div className="relative flex items-center">
                 <input
                   type="text"
@@ -289,7 +287,7 @@ export const Library: React.FC = () => {
                     <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
                       {details.item.poster_path ? (
                         <img
-                          src={convertFileSrc(details.item.poster_path)}
+                          src={getPosterUrl(details.item.poster_path)}
                           alt={details.item.title}
                           className="w-full h-full object-cover"
                           loading="lazy"
@@ -392,21 +390,57 @@ export const Library: React.FC = () => {
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-[10px] text-gray-500 tracking-wider">TAG</label>
-                  <select
-                    value={editTag}
-                    onChange={(e) => setEditTag(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-accent font-bold font-mono text-xs"
+                <div className="space-y-1.5 relative">
+                  <label className="text-[10px] text-gray-500 tracking-wider">TAGS</label>
+                  <div 
+                    onClick={() => setIsTagsDropdownOpen(!isTagsDropdownOpen)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-accent font-bold font-mono text-xs cursor-pointer flex justify-between items-center min-h-[34px]"
                   >
-                    <option value="None">None</option>
-                    <option value="Favorites">Favorites</option>
-                    <option value="Kids">Kids</option>
-                    <option value="Late Night">Late Night</option>
-                    <option value="Classic">Classic</option>
-                    <option value="Must Watch">Must Watch</option>
-                    <option value="Holiday">Holiday</option>
-                  </select>
+                    <div className="flex flex-wrap gap-1">
+                      {editTags.length === 0 ? (
+                        <span className="text-gray-600 font-normal">Select tags...</span>
+                      ) : (
+                        editTags.map((tag) => (
+                          <span key={tag} className="bg-accent/15 border border-accent/30 text-accent px-1.5 py-0.5 rounded text-[9px] font-bold">
+                            {tag}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                    <span className="text-gray-500 text-[10px]">{isTagsDropdownOpen ? "▲" : "▼"}</span>
+                  </div>
+
+                  {isTagsDropdownOpen && (
+                    <>
+                      {/* Invisible backdrop to close the dropdown on click outside */}
+                      <div className="fixed inset-0 z-40" onClick={() => setIsTagsDropdownOpen(false)} />
+                      <div className="absolute left-0 right-0 mt-1 bg-gray-950 border border-gray-800 rounded-lg p-2 z-50 space-y-1 shadow-2xl max-h-48 overflow-y-auto">
+                        {availableTags.map((tag) => {
+                          const isChecked = editTags.includes(tag);
+                          return (
+                            <label 
+                              key={tag} 
+                              className="flex items-center space-x-2 p-1.5 rounded hover:bg-gray-900 cursor-pointer text-xs font-mono select-none"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  if (isChecked) {
+                                    setEditTags(editTags.filter((t) => t !== tag));
+                                  } else {
+                                    setEditTags([...editTags, tag]);
+                                  }
+                                }}
+                                className="rounded border-gray-800 text-accent focus:ring-accent accent-accent"
+                              />
+                              <span className={isChecked ? "text-accent font-bold" : "text-gray-400"}>{tag}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="space-y-1.5">
@@ -472,6 +506,14 @@ export const Library: React.FC = () => {
                           {selectedItem.files[0].file_path.split("/").pop()}
                         </span>
                       </div>
+                      <div className="flex justify-between border-b border-gray-900 pb-1.5">
+                        <span className="text-gray-500">QUALITY SCORE:</span>
+                        <span className="text-accent font-bold">
+                          {selectedItem.files[0].quality_score !== undefined && selectedItem.files[0].quality_score !== null
+                            ? `${selectedItem.files[0].quality_score.toFixed(1)} / 10.0`
+                            : "N/A"}
+                        </span>
+                      </div>
                       <div className="flex justify-between">
                         <span className="text-gray-500">RESOLUTION:</span>
                         <span className="text-accent font-bold">{selectedItem.files[0].resolution || "N/A"}</span>
@@ -518,24 +560,51 @@ export const Library: React.FC = () => {
               </div>
             </div>
 
-            <div className="pt-6 border-t border-gray-800 flex space-x-3">
-              <button
-                onClick={handleSaveMetadata}
-                className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors"
-              >
-                SAVE CHANGES
-              </button>
+            <div className="pt-6 border-t border-gray-800 space-y-3">
               <button
                 onClick={async () => {
-                  if (confirm("Delete this media item permanently from library?")) {
-                    await deleteItem(selectedItem.item.id);
-                    setSelectedItem(null);
+                  setIsRefreshing(true);
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("refresh_item_metadata", { itemId: selectedItem.item.id });
+                    alert("Metadata successfully refreshed from online API!");
+                    await fetchItems();
+                    const updated = useLibraryStore.getState().items.find(i => i.item.id === selectedItem.item.id);
+                    if (updated) {
+                      handleSelectCard(updated);
+                    }
+                  } catch (e) {
+                    alert(`Failed to refresh metadata: ${e}`);
+                  } finally {
+                    setIsRefreshing(false);
                   }
                 }}
-                className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors"
+                disabled={isRefreshing}
+                className="w-full bg-emerald-500/15 border border-emerald-500/35 text-emerald-500 hover:bg-emerald-500 hover:text-background font-bold text-xs py-2 rounded-lg transition-colors flex items-center justify-center space-x-1.5 focus:outline-none disabled:opacity-50"
               >
-                <Trash2 size={16} />
+                <RefreshCw size={12} className={isRefreshing ? "animate-spin" : ""} />
+                <span>{isRefreshing ? "REFRESHING..." : "REFRESH ONLINE DATA"}</span>
               </button>
+
+              <div className="flex space-x-3">
+                <button
+                  onClick={handleSaveMetadata}
+                  className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors focus:outline-none"
+                >
+                  SAVE CHANGES
+                </button>
+                <button
+                  onClick={async () => {
+                    if (confirm("Delete this media item permanently from library?")) {
+                      await deleteItem(selectedItem.item.id);
+                      setSelectedItem(null);
+                    }
+                  }}
+                  className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors focus:outline-none"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </div>
           </div>
         )}

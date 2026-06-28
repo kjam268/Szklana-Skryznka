@@ -62,7 +62,8 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
             commands::purge_database,
-            commands::get_smart_suggestions
+            commands::get_smart_suggestions,
+            commands::refresh_item_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
