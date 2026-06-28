@@ -917,17 +917,7 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
     if item.media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
         auto_tags.push("Documentary".to_string());
     }
-    let title_lower = item.title.to_lowercase();
-    if online.genres.iter().any(|g| g.to_lowercase().contains("talk") || g.to_lowercase().contains("late night"))
-        || title_lower.contains("late night")
-        || title_lower.contains("tonight show")
-        || title_lower.contains("daily show")
-        || title_lower.contains("kimmel")
-        || title_lower.contains("colbert")
-        || title_lower.contains("fallon")
-    {
-        auto_tags.push("Late Night".to_string());
-    }
+
 
     for tag_name in &auto_tags {
         let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")

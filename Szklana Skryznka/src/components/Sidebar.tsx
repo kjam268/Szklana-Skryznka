@@ -144,26 +144,35 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       >
         <div>
           {/* Header Branding */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-gray-800">
-            {!isCollapsed && (
-              <div className="flex items-center space-x-2">
-                <Tv size={18} className="text-accent animate-pulse drop-shadow-[0_0_8px_rgba(6,182,212,0.6)]" />
-                <span className="font-mono text-sm tracking-widest font-bold text-gray-200">
-                  SZKLANA SKRYZNKA
-                </span>
-              </div>
+          <div className={`flex items-center p-4 border-b border-gray-800 ${isCollapsed ? "justify-center" : "justify-between"}`}>
+            {!isCollapsed ? (
+              <>
+                <button
+                  onClick={() => setIsCollapsed(true)}
+                  className="flex items-center space-x-2.5 focus:outline-none text-left group hover:opacity-80 transition-all"
+                  title="Collapse Sidebar"
+                >
+                  <img src="/app-icon.png" alt="App Icon" className="w-[30px] h-[30px] rounded hover:scale-[1.05] transition-transform drop-shadow-[0_0_8px_rgba(6,182,212,0.4)] aspect-square object-contain" />
+                  <span className="font-mono text-sm tracking-widest font-bold text-gray-200 group-hover:text-accent transition-colors">
+                    SZKLANA SKRYZNKA
+                  </span>
+                </button>
+                <button 
+                  onClick={() => setIsCollapsed(!isCollapsed)}
+                  className="text-gray-400 hover:text-accent focus:outline-none p-1 rounded hover:bg-gray-800 transition-colors"
+                >
+                  <ChevronLeft size={16} />
+                </button>
+              </>
+            ) : (
+              <button 
+                onClick={() => setIsCollapsed(!isCollapsed)}
+                className="hover:scale-[1.08] active:scale-[0.92] transition-transform focus:outline-none p-1 rounded hover:bg-gray-850 flex items-center justify-center"
+                title="Expand Sidebar"
+              >
+                <img src="/app-icon.png" alt="App Icon" className="w-[36px] h-[36px] rounded drop-shadow-[0_0_8px_rgba(6,182,212,0.4)] aspect-square object-contain" />
+              </button>
             )}
-            {isCollapsed && (
-              <span className="w-6 h-6 rounded-full bg-accent flex items-center justify-center text-[10px] font-mono font-bold text-background mx-auto">
-                SS
-              </span>
-            )}
-            <button 
-              onClick={() => setIsCollapsed(!isCollapsed)}
-              className="text-gray-400 hover:text-accent focus:outline-none p-1 rounded hover:bg-gray-800 transition-colors"
-            >
-              {isCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-            </button>
           </div>
 
           {/* Navigation Items */}

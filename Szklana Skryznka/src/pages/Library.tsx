@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, MediaItemDetails, Subtitle } from "../store";
-import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw } from "lucide-react";
+import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw, Crown } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -14,11 +14,12 @@ export const Library: React.FC = () => {
   const [scanPath, setScanPath] = useState("");
   const [selectedTab, setSelectedTab] = useState("All");
   const [selectedShow, setSelectedShow] = useState<string | null>(null);
+  const [selectedSeason, setSelectedSeason] = useState<number | null>(null);
   const [editTags, setEditTags] = useState<string[]>([]);
   const [isTagsDropdownOpen, setIsTagsDropdownOpen] = useState(false);
   const [editDirectors, setEditDirectors] = useState("");
   const [editActors, setEditActors] = useState("");
-  const availableTags = ["Favorites", "Kids", "Late Night", "Classic", "Must Watch", "Holiday"];
+  const availableTags = ["Favorites", "Kids", "Classic"];
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -157,15 +158,24 @@ export const Library: React.FC = () => {
     return title;
   };
 
+  const getSeasonNumber = (title: string): number => {
+    const match = title.match(/ - S(\d{2})E\d{2}/i);
+    if (match) {
+      return parseInt(match[1]);
+    }
+    return 1;
+  };
+
   // Filter items based on search query and tag filter (represented by selectedTab)
   const filteredItems = items.filter((details) => {
     const titleMatch = details.item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                        (details.item.original_title && details.item.original_title.toLowerCase().includes(searchQuery.toLowerCase()));
+    
     const tagMatch = selectedTab === "All" || details.tags.includes(selectedTab);
     return titleMatch && tagMatch;
   });
 
-  const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Late Night", "Favorites", "Kids", "Classic", "Must Watch", "Holiday"];
+  const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Favorites", "Kids", "Classic"];
 
   const getPosterUrl = (path?: string) => {
     if (!path) return "";
@@ -225,13 +235,14 @@ export const Library: React.FC = () => {
                 className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent"
               />
             </div>
-            <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-thin">
+            <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
               {libraryTabs.map((tab) => (
                 <button
                   key={tab}
                   onClick={() => {
                     setSelectedTab(tab);
                     setSelectedShow(null);
+                    setSelectedSeason(null);
                   }}
                   className={`text-xs px-3 py-2 rounded-lg font-mono transition-colors whitespace-nowrap ${
                     selectedTab === tab
@@ -269,35 +280,41 @@ export const Library: React.FC = () => {
             <div className="h-full flex items-center justify-center text-xs text-gray-600">
               No media items matching filters in this collection.
             </div>
-          ) : selectedTab === "TV show" ? (
+          ) : selectedShow ? (
             (() => {
-              // Group items by TV Show Name
-              const groupedShows: { [showName: string]: MediaItemDetails[] } = {};
-              filteredItems.forEach((details) => {
-                const showName = getShowName(details.item.title);
-                if (!groupedShows[showName]) {
-                  groupedShows[showName] = [];
+              // Level 2 / Level 3: Seasons and Episodes drill-down
+              // 1. Gather all episodes for this show from all items
+              const allShowEpisodes = items.filter(details => details.item.media_type === "Episode" && getShowName(details.item.title) === selectedShow);
+              
+              // Group episodes of the selected show by Season
+              const groupedSeasons: { [seasonNum: number]: MediaItemDetails[] } = {};
+              allShowEpisodes.forEach((details) => {
+                const sNum = getSeasonNumber(details.item.title);
+                if (!groupedSeasons[sNum]) {
+                  groupedSeasons[sNum] = [];
                 }
-                groupedShows[showName].push(details);
+                groupedSeasons[sNum].push(details);
               });
 
-              if (selectedShow) {
-                // Render episodes for the selected show
-                const episodes = groupedShows[selectedShow] || [];
+              if (selectedSeason !== null) {
+                // Render Level 3: Episodes of the selected Season
+                const seasonEpisodes = groupedSeasons[selectedSeason] || [];
                 return (
                   <div className="space-y-4">
                     <div className="flex items-center space-x-3 mb-2">
                       <button
-                        onClick={() => setSelectedShow(null)}
+                        onClick={() => setSelectedSeason(null)}
                         className="text-[10px] bg-gray-900 border border-gray-800 text-gray-400 hover:text-accent font-bold px-3 py-1.5 rounded transition-all focus:outline-none flex items-center space-x-1"
                       >
-                        <span>←</span> <span>BACK TO TV SHOWS</span>
+                        <span>←</span> <span>BACK TO SEASONS</span>
                       </button>
-                      <span className="text-xs font-bold text-accent tracking-widest">{selectedShow.toUpperCase()}</span>
+                      <span className="text-xs text-gray-500 tracking-wider">
+                        {selectedShow.toUpperCase()} &gt; SEASON {selectedSeason}
+                      </span>
                     </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
-                      {episodes.map((details) => {
+                      {seasonEpisodes.map((details) => {
                         const isSelected = selectedItem?.item.id === details.item.id;
                         return (
                           <div
@@ -321,8 +338,16 @@ export const Library: React.FC = () => {
                                   <span className="text-[10px] text-gray-500">NO ART</span>
                                 </div>
                               )}
-                              <div className="absolute top-2 left-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
-                                {details.item.media_type.toUpperCase()}
+                              <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start">
+                                <div className="text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
+                                  {details.item.media_type.toUpperCase()}
+                                </div>
+                                {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
+                                  <div className="text-[9px] bg-amber-500/90 text-background px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20">
+                                    <Crown size={9} className="fill-current text-background" />
+                                    <span>{Math.round(details.files[0].quality_score)}</span>
+                                  </div>
+                                )}
                               </div>
                             </div>
                             <div className="p-3 space-y-1">
@@ -340,21 +365,87 @@ export const Library: React.FC = () => {
                 );
               }
 
-              // Render grouped TV Shows list
+              // Level 2: Seasons of the selected Show
+              const seasonNums = Object.keys(groupedSeasons).map(Number).sort((a, b) => a - b);
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-center space-x-3 mb-2">
+                    <button
+                      onClick={() => setSelectedShow(null)}
+                      className="text-[10px] bg-gray-900 border border-gray-800 text-gray-400 hover:text-accent font-bold px-3 py-1.5 rounded transition-all focus:outline-none flex items-center space-x-1"
+                    >
+                      <span>←</span> <span>BACK TO TV SHOWS</span>
+                    </button>
+                    <span className="text-xs font-bold text-accent tracking-widest">{selectedShow.toUpperCase()}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
+                    {seasonNums.map((sNum) => {
+                      const seasonGroup = groupedSeasons[sNum];
+                      const posterItem = seasonGroup.find(item => item.item.poster_path) || seasonGroup[0];
+                      
+                      return (
+                        <div
+                          key={sNum}
+                          onClick={() => setSelectedSeason(sNum)}
+                          className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
+                        >
+                          <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
+                            {posterItem.item.poster_path ? (
+                              <img
+                                src={getPosterUrl(posterItem.item.poster_path)}
+                                alt={`Season ${sNum}`}
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
+                                <Film size={32} />
+                                <span className="text-[10px] text-gray-500">NO ART</span>
+                              </div>
+                            )}
+                            <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
+                              SEASON {sNum}
+                            </div>
+                          </div>
+                          <div className="p-3 space-y-1">
+                            <div className="text-xs font-bold text-gray-200 truncate">Season {sNum}</div>
+                            <div className="flex justify-between items-center text-[10px] text-accent">
+                              <span className="font-bold tracking-wider font-mono">{seasonGroup.length} {seasonGroup.length === 1 ? "EPISODE" : "EPISODES"}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()
+          ) : selectedTab === "TV show" ? (
+            (() => {
+              // Level 1 TV Shows list for "TV show" Tab (Only TV Show folder cards)
+              const groupedShows: { [showName: string]: MediaItemDetails[] } = {};
+              filteredItems.forEach((details) => {
+                const showName = getShowName(details.item.title);
+                if (!groupedShows[showName]) {
+                  groupedShows[showName] = [];
+                }
+                groupedShows[showName].push(details);
+              });
+
               const showNames = Object.keys(groupedShows);
               return (
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
                   {showNames.map((showName) => {
                     const group = groupedShows[showName];
                     const firstItem = group[0];
-                    // Find a poster path if available
                     const posterItem = group.find(item => item.item.poster_path);
                     const posterPath = posterItem ? posterItem.item.poster_path : firstItem.item.poster_path;
                     
                     return (
                       <div
                         key={showName}
-                        onClick={() => setSelectedShow(showName)}
+                        onClick={() => { setSelectedShow(showName); setSelectedSeason(null); }}
                         className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
                       >
                         <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
@@ -388,49 +479,129 @@ export const Library: React.FC = () => {
               );
             })()
           ) : (
-            // Flat grid of items for other tabs
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
-              {filteredItems.map((details) => {
-                const isSelected = selectedItem?.item.id === details.item.id;
-                return (
-                  <div
-                    key={details.item.id}
-                    onClick={() => handleSelectCard(details)}
-                    className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
-                      isSelected ? "border-accent cyan-glow" : "border-gray-800 hover:border-gray-600"
-                    }`}
-                  >
-                    {/* Poster image */}
-                    <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                      {details.item.poster_path ? (
-                        <img
-                          src={getPosterUrl(details.item.poster_path)}
-                          alt={details.item.title}
-                          className="w-full h-full object-cover"
-                          loading="lazy"
-                        />
-                      ) : (
-                        <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                          <Film size={32} />
-                          <span className="text-[10px] text-gray-500">NO ART</span>
+            // Flat grid of items for other tabs (AND "All" tab, but with TV show folder cards substituted!)
+            (() => {
+              // If selectedTab === "All", we substitute all media_type === "Episode" items with their Show folder card
+              const renderList: (MediaItemDetails | { isShowFolder: true, showName: string, episodes: MediaItemDetails[] })[] = [];
+              const groupedEpisodes: { [showName: string]: MediaItemDetails[] } = {};
+
+              filteredItems.forEach((details) => {
+                if (details.item.media_type === "Episode") {
+                  const showName = getShowName(details.item.title);
+                  if (!groupedEpisodes[showName]) {
+                    groupedEpisodes[showName] = [];
+                  }
+                  groupedEpisodes[showName].push(details);
+                } else {
+                  renderList.push(details);
+                }
+              });
+
+              // Add TV Show folders to the list if selectedTab is "All"
+              if (selectedTab === "All") {
+                Object.keys(groupedEpisodes).forEach((showName) => {
+                  renderList.push({
+                    isShowFolder: true,
+                    showName,
+                    episodes: groupedEpisodes[showName],
+                  });
+                });
+              }
+
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
+                  {renderList.map((entry) => {
+                    if ("isShowFolder" in entry) {
+                      // Render TV Show Folder Card in "All" view
+                      const group = entry.episodes;
+                      const firstItem = group[0];
+                      const posterItem = group.find(item => item.item.poster_path);
+                      const posterPath = posterItem ? posterItem.item.poster_path : firstItem.item.poster_path;
+
+                      return (
+                        <div
+                          key={entry.showName}
+                          onClick={() => { setSelectedShow(entry.showName); setSelectedSeason(null); }}
+                          className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
+                        >
+                          <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
+                            {posterPath ? (
+                              <img
+                                src={getPosterUrl(posterPath)}
+                                alt={entry.showName}
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
+                                <Film size={32} />
+                                <span className="text-[10px] text-gray-500">NO ART</span>
+                              </div>
+                            )}
+                            <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
+                              TV SHOW
+                            </div>
+                          </div>
+                          <div className="p-3 space-y-1">
+                            <div className="text-xs font-bold text-gray-200 truncate">{entry.showName}</div>
+                            <div className="flex justify-between items-center text-[10px] text-accent">
+                              <span className="font-bold tracking-wider font-mono">{group.length} {group.length === 1 ? "EPISODE" : "EPISODES"}</span>
+                            </div>
+                          </div>
                         </div>
-                      )}
-                      <div className="absolute top-2 left-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
-                        {details.item.media_type.toUpperCase()}
+                      );
+                    }
+
+                    // Render Standard card (e.g. Movies, Bumpers)
+                    const details = entry;
+                    const isSelected = selectedItem?.item.id === details.item.id;
+                    return (
+                      <div
+                        key={details.item.id}
+                        onClick={() => handleSelectCard(details)}
+                        className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
+                          isSelected ? "border-accent cyan-glow" : "border-gray-800 hover:border-gray-600"
+                        }`}
+                      >
+                        <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
+                          {details.item.poster_path ? (
+                            <img
+                              src={getPosterUrl(details.item.poster_path)}
+                              alt={details.item.title}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
+                              <Film size={32} />
+                              <span className="text-[10px] text-gray-500">NO ART</span>
+                            </div>
+                          )}
+                          <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start">
+                            <div className="text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
+                              {details.item.media_type.toUpperCase()}
+                            </div>
+                            {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
+                              <div className="text-[9px] bg-amber-500/90 text-background px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20">
+                                <Crown size={9} className="fill-current text-background" />
+                                <span>{Math.round(details.files[0].quality_score)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="p-3 space-y-1">
+                          <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
+                          <div className="flex justify-between items-center text-[10px] text-gray-500">
+                            <span>{details.item.year || "Unknown"}</span>
+                            <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    {/* Poster Info */}
-                    <div className="p-3 space-y-1">
-                      <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
-                      <div className="flex justify-between items-center text-[10px] text-gray-500">
-                        <span>{details.item.year || "Unknown"}</span>
-                        <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                    );
+                  })}
+                </div>
+              );
+            })()
           )}
         </div>
       </div>
@@ -456,15 +627,7 @@ export const Library: React.FC = () => {
 
               {/* Editable Fields */}
               <div className="space-y-4 text-xs">
-                <div className="space-y-1.5">
-                  <label className="text-[10px] text-gray-500 tracking-wider">ASSET TITLE</label>
-                  <input
-                    type="text"
-                    value={editTitle}
-                    onChange={(e) => setEditTitle(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200 font-sans"
-                  />
-                </div>
+
 
                 <div className="space-y-1.5">
                   <label className="text-[10px] text-gray-500 tracking-wider">ORIGINAL TITLE</label>
@@ -636,7 +799,7 @@ export const Library: React.FC = () => {
                         <span className="text-gray-500">QUALITY SCORE:</span>
                         <span className="text-accent font-bold">
                           {selectedItem.files[0].quality_score !== undefined && selectedItem.files[0].quality_score !== null
-                            ? `${selectedItem.files[0].quality_score.toFixed(1)} / 10.0`
+                            ? `${Math.round(selectedItem.files[0].quality_score)} / 100`
                             : "N/A"}
                         </span>
                       </div>
@@ -709,7 +872,7 @@ export const Library: React.FC = () => {
                 className="w-full bg-emerald-500/15 border border-emerald-500/35 text-emerald-500 hover:bg-emerald-500 hover:text-background font-bold text-xs py-2 rounded-lg transition-colors flex items-center justify-center space-x-1.5 focus:outline-none disabled:opacity-50"
               >
                 <RefreshCw size={12} className={isRefreshing ? "animate-spin" : ""} />
-                <span>{isRefreshing ? "REFRESHING..." : "REFRESH ONLINE DATA"}</span>
+                <span>{isRefreshing ? "REFRESHING..." : "REFRESH FROM ONLINE"}</span>
               </button>
 
               <div className="flex space-x-3">

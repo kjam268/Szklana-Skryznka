@@ -625,10 +625,43 @@ pub fn extract_metadata(path: &Path) -> (
             }
         }
     } else {
-        // Fallback: heuristic based on file size if ffprobe is completely missing
+        // Fallback: heuristic based on file size and filename tags if ffprobe is completely missing or empty
         if let Ok(meta) = fs::metadata(path) {
             let size = meta.len();
             let name_lower = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            
+            // Heuristic resolution
+            if name_lower.contains("4k") || name_lower.contains("2160p") {
+                resolution = "4K".to_string();
+                video_bitrate = Some(35_000_000);
+                video_codec = "hevc".to_string();
+            } else if name_lower.contains("720p") {
+                resolution = "720p".to_string();
+                video_bitrate = Some(4_000_000);
+            } else {
+                resolution = "1080p".to_string();
+                video_bitrate = Some(8_000_000);
+            }
+
+            if name_lower.contains("hevc") || name_lower.contains("h265") || name_lower.contains("x265") {
+                video_codec = "hevc".to_string();
+            }
+            if name_lower.contains("10bit") || name_lower.contains("hdr") {
+                video_codec = format!("{}-10bit", video_codec);
+            }
+
+            // Audio Channels and Codec heuristic
+            if name_lower.contains("7.1") || name_lower.contains("8ch") {
+                audio_channels = Some(8);
+                audio_codec = "truehd".to_string();
+            } else if name_lower.contains("5.1") || name_lower.contains("6ch") || name_lower.contains("dts") {
+                audio_channels = Some(6);
+                audio_codec = "dts".to_string();
+            } else {
+                audio_channels = Some(2);
+                audio_codec = "aac".to_string();
+            }
+
             let is_episode = name_lower.contains("s0") || name_lower.contains("s1") || name_lower.contains("e0") || name_lower.contains("e1") || size < 600_000_000;
             
             if is_episode {
@@ -643,6 +676,12 @@ pub fn extract_metadata(path: &Path) -> (
                 if estimated_dur > 0 {
                     duration = estimated_dur;
                 }
+            }
+
+            // If we have size and estimated duration, calculate a realistic bitrate
+            if size > 0 && duration > 0 {
+                let bps = (size * 8) / (duration as u64);
+                video_bitrate = Some(bps as i64);
             }
         }
     }
@@ -814,85 +853,81 @@ pub fn calculate_quality_score(
     video_codec: &str,
     audio_codec: &str,
 ) -> f64 {
-    let mut score: f64 = 0.0;
+    let mut score = 0;
 
-    // 1. Resolution Score (max 4.0 points)
-    score += match resolution {
-        "4K" => 4.0,
-        "1080p" => 3.0,
-        "720p" => 2.0,
-        _ => 1.0,
+    // 1. Video Resolution
+    let height = if resolution.eq_ignore_ascii_case("4K") {
+        2160
+    } else {
+        resolution.chars()
+            .filter(|c| c.is_digit(10))
+            .collect::<String>()
+            .parse::<i32>()
+            .unwrap_or(0)
     };
 
-    // 2. Video Bitrate Score (max 3.0 points)
-    if let Some(bitrate) = video_bitrate {
-        if bitrate > 20_000_000 {
-            score += 3.0;
-        } else if bitrate > 8_000_000 {
-            score += 2.0;
-        } else if bitrate > 2_000_000 {
-            score += 1.5;
-        } else if bitrate > 500_000 {
-            score += 1.0;
-        } else {
-            score += 0.5;
-        }
-    } else {
-        score += 1.5;
+    if height >= 2160 {
+        score += 500; // 4K
+    } else if height >= 1080 {
+        score += 200; // 1080p
+    } else if height >= 720 {
+        score += 100; // 720p
     }
 
-    // 3. Audio Quality Score (max 2.0 points)
-    if let Some(channels) = audio_channels {
-        if channels >= 6 {
-            score += 1.5;
-        } else if channels >= 2 {
-            score += 1.0;
-        } else {
-            score += 0.5;
-        }
-    } else {
-        score += 1.0;
+    // 2. Bitrate (Mbps)
+    if let Some(bitrate_bps) = video_bitrate {
+        let mbps = (bitrate_bps as f64) / 1_000_000.0;
+        score += (mbps * 10.0) as i32;
     }
 
-    let ac = audio_codec.to_lowercase();
-    if ac.contains("dts") || ac.contains("truehd") || ac.contains("atmos") {
-        score += 0.5;
-    } else if ac.contains("aac") || ac.contains("ac3") || ac.contains("eac3") {
-        score += 0.3;
+    // 3. Video Codec Efficiency
+    let v_codec = video_codec.to_uppercase();
+    if v_codec.contains("HEVC") || v_codec.contains("H265") || v_codec.contains("AV1") {
+        score += 50;
     }
 
-    // 4. Video Codec efficiency bonus (max 1.0 points)
-    let vc = video_codec.to_lowercase();
-    if vc.contains("hevc") || vc.contains("h265") || vc.contains("av1") {
-        score += 1.0;
-    } else if vc.contains("h264") || vc.contains("x264") {
-        score += 0.5;
+    // 4. HDR Feature
+    if v_codec.contains("10BIT") || v_codec.contains("HDR") {
+        score += 50;
     }
 
-    if score > 10.0 {
-        score = 10.0;
+    // 5. Audio Channels
+    let channels = audio_channels.unwrap_or(0);
+    if channels >= 8 {
+        score += 150; // 7.1
+    } else if channels >= 6 {
+        score += 100; // 5.1
     }
-    
-    (score * 10.0).round() / 10.0
+
+    // 6. Audio Codec Quality
+    let a_codec = audio_codec.to_uppercase();
+    if a_codec.contains("DTS") || a_codec.contains("TRUEHD") || a_codec.contains("ATMOS") {
+        score += 50;
+    }
+
+    let mut final_score = (score as f64) / 10.0;
+    if final_score > 100.0 {
+        final_score = 100.0;
+    }
+    final_score
 }
 
 pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Running database de-duplication pass...");
     
-    // 1. Populate quality_score for any existing files that have NULL
+    // 1. Re-analyze all existing files to update metadata and quality scores
     let unresolved_files = sqlx::query(
-        "SELECT id, resolution, video_bitrate, audio_channels, video_codec, audio_codec FROM media_files WHERE quality_score IS NULL"
+        "SELECT id, file_path FROM media_files"
     )
     .fetch_all(pool)
     .await?;
 
     for row in unresolved_files {
         let file_id: String = row.get("id");
-        let resolution: String = row.get("resolution");
-        let video_bitrate: Option<i64> = row.get("video_bitrate");
-        let audio_channels: Option<i32> = row.get("audio_channels");
-        let video_codec: String = row.get("video_codec");
-        let audio_codec: String = row.get("audio_codec");
+        let file_path: String = row.get("file_path");
+
+        let path = std::path::Path::new(&file_path);
+        let (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language) = extract_metadata(path);
 
         let score = calculate_quality_score(
             &resolution,
@@ -902,11 +937,24 @@ pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::
             &audio_codec,
         );
 
-        sqlx::query("UPDATE media_files SET quality_score = $1 WHERE id = $2")
-            .bind(score)
-            .bind(&file_id)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE media_files SET \
+             duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
+             video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
+             quality_score = $9 WHERE id = $10"
+        )
+        .bind(duration)
+        .bind(&resolution)
+        .bind(&video_codec)
+        .bind(&audio_codec)
+        .bind(video_bitrate)
+        .bind(frame_rate)
+        .bind(audio_channels)
+        .bind(&audio_language)
+        .bind(score)
+        .bind(&file_id)
+        .execute(pool)
+        .await?;
     }
 
     // 2. Query all media items that have multiple files
@@ -1213,17 +1261,7 @@ pub async fn scan_directory(
             if media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
                 auto_tags.push("Documentary".to_string());
             }
-            let title_lower = title.to_lowercase();
-            if online.genres.iter().any(|g| g.to_lowercase().contains("talk") || g.to_lowercase().contains("late night"))
-                || title_lower.contains("late night")
-                || title_lower.contains("tonight show")
-                || title_lower.contains("daily show")
-                || title_lower.contains("kimmel")
-                || title_lower.contains("colbert")
-                || title_lower.contains("fallon")
-            {
-                auto_tags.push("Late Night".to_string());
-            }
+
 
             for tag_name in &auto_tags {
                 let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
