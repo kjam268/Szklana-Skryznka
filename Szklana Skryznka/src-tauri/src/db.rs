@@ -46,9 +46,10 @@ pub async fn init_db(app_handle: &tauri::AppHandle) -> Result<SqlitePool, Box<dy
     let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN audio_tracks TEXT;").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN embedded_subtitles TEXT;").execute(&pool).await;
     
-    // Schema updates: Ensure rt_score and imdb_score are present in media_items
+    // Schema updates: Ensure rt_score, imdb_score and imdb_id are present in media_items
     let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN rt_score TEXT;").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN imdb_score TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN imdb_id TEXT;").execute(&pool).await;
 
     // Seed 100k movies reference database
     seed_movies_if_empty(&pool).await?;

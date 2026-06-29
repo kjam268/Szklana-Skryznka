@@ -16,6 +16,9 @@ export interface MediaItem {
   director_id?: string;
   created_at: string;
   updated_at: string;
+  rt_score?: string;
+  imdb_score?: string;
+  imdb_id?: string;
 }
 
 export interface MediaFile {

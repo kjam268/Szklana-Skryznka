@@ -152,6 +152,13 @@ pub fn run() {
                     }
                 }
 
+                // Global tag cleaning pass for all media items in database on startup
+                if let Ok(item_ids) = sqlx::query_scalar::<_, String>("SELECT id FROM media_items").fetch_all(&pool).await {
+                    for mid in item_ids {
+                        let _ = scanner::check_and_clean_tags(&pool, &mid).await;
+                    }
+                }
+
                 // Spawn background worker thread for quality score processing
                 let worker_pool = pool.clone();
                 let worker_handle = handle.clone();
@@ -368,13 +375,16 @@ pub fn run() {
                                         .execute(&worker_pool)
                                         .await;
 
-                                        // Trigger a database deduplication pass to clean up lower quality duplicate records
-                                        let _ = scanner::deduplicate_database(&worker_pool).await;
+                                        // Deduplication will run at the end of the batch
 
                                         // Notify frontend
                                         let _ = worker_handle.emit("library-updated", ());
                                     }
                                 }
+
+                                // Run second-layer deduplication pass AFTER all files in the batch have been processed
+                                let _ = scanner::run_second_layer_deduplication(&worker_pool).await;
+
                                 if let Some(tray) = worker_handle.tray_by_id("main-tray") {
                                     let _ = tray.set_tooltip(Some("Szklana Skryznka: Idle".to_string()));
                                 }

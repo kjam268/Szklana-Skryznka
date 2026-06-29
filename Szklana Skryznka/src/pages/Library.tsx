@@ -15,11 +15,9 @@ export const Library: React.FC = () => {
   const [selectedTab, setSelectedTab] = useState("All");
   const [selectedShow, setSelectedShow] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number | null>(null);
-  const [editTags, setEditTags] = useState<string[]>([]);
-  const [isTagsDropdownOpen, setIsTagsDropdownOpen] = useState(false);
+  const [editTags, setEditTags] = useState("");
   const [editDirectors, setEditDirectors] = useState("");
   const [editActors, setEditActors] = useState("");
-  const availableTags = ["Favorites", "Kids", "Classic"];
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -143,7 +141,7 @@ export const Library: React.FC = () => {
     setEditPoster(details.item.poster_path || "");
     setEditBackdrop(details.item.backdrop_path || "");
     setEditGenres(details.genres.join(", "));
-    setEditTags(details.tags);
+    setEditTags((details.tags || []).join(", "));
     setEditDirectors((details.directors || []).join(", "));
     setEditActors((details.actors || []).join(", "));
     setEditRtScore(details.item.rt_score || "");
@@ -171,7 +169,7 @@ export const Library: React.FC = () => {
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
       tags: (() => {
         const dirs = editDirectors.split(",").map((d) => d.trim()).filter((d) => d !== "");
-        let t = [...editTags];
+        let t = editTags.split(",").map((tag) => tag.trim()).filter((tag) => tag !== "");
         if (dirs.some(d => d.toLowerCase().includes("walt disney"))) {
           if (!t.includes("Animation")) {
             t.push("Animation");
@@ -354,7 +352,7 @@ export const Library: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 h-screen flex bg-background text-gray-200 font-mono overflow-hidden">
+    <div className="flex-1 h-screen flex bg-background text-gray-200 font-mono overflow-hidden relative">
       {/* MAIN CONTAINER */}
       <div className="flex-1 flex flex-col justify-between p-6 overflow-hidden">
         {/* TOP BAR / CONTROLS */}
@@ -421,7 +419,7 @@ export const Library: React.FC = () => {
               </select>
             </div>
           </div>
-          <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
+          <div className="flex space-x-1.5 overflow-x-auto w-full scrollbar-none">
               {libraryTabs.map((tab) => {
                 const isNotFound = tab === "Not Found";
                 let btnStyle = "";
@@ -579,6 +577,21 @@ export const Library: React.FC = () => {
                                   className={details.tags.includes("Favorites") ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
                                 />
                               </button>
+
+                              {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
+                              <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
+                                {details.item.imdb_score && (
+                                  <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg">
+                                    IMDb {details.item.imdb_score}
+                                  </span>
+                                )}
+                                {details.item.rt_score && (
+                                  <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center space-x-0.5">
+                                    <span>🍅</span>
+                                    <span>{details.item.rt_score}</span>
+                                  </span>
+                                )}
+                              </div>
 
                               {/* Overlaid Tag Badges (Top Left) */}
                               <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
@@ -1066,6 +1079,21 @@ export const Library: React.FC = () => {
                             />
                           </button>
 
+                          {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
+                          <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
+                            {details.item.imdb_score && (
+                              <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg">
+                                IMDb {details.item.imdb_score}
+                              </span>
+                            )}
+                            {details.item.rt_score && (
+                              <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center space-x-0.5">
+                                <span>🍅</span>
+                                <span>{details.item.rt_score}</span>
+                              </span>
+                            )}
+                          </div>
+
                           {/* Overlaid Tag Badges (Top Left) */}
                           <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
                             {details.tags && details.tags.map((tag) => {
@@ -1093,19 +1121,7 @@ export const Library: React.FC = () => {
                         <div className="p-3 space-y-1">
                           <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
                           <div className="flex justify-between items-center text-[10px] text-gray-500">
-                            <span className="flex items-center space-x-1.5 min-w-0">
-                              <span className="shrink-0">{details.item.year || "Unknown"}</span>
-                              {details.item.imdb_score && (
-                                <span className="bg-yellow-500/20 text-yellow-400 font-extrabold px-1 rounded text-[7.5px] border border-yellow-500/30 font-sans tracking-tight shrink-0">
-                                  IMDb {details.item.imdb_score}
-                                </span>
-                              )}
-                              {details.item.rt_score && (
-                                <span className="bg-red-500/20 text-red-400 font-extrabold px-1 rounded text-[7.5px] border border-red-500/30 font-sans tracking-tight shrink-0">
-                                  RT {details.item.rt_score}
-                                </span>
-                              )}
-                            </span>
+                            <span>{details.item.year || "Unknown"}</span>
                             <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
                           </div>
                         </div>
@@ -1119,10 +1135,18 @@ export const Library: React.FC = () => {
         </div>
       </div>
 
+      {/* METADATA INSPECTOR BACKDROP OVERLAY */}
+      {selectedItem && (
+        <div 
+          onClick={() => setSelectedItem(null)}
+          className="absolute inset-0 bg-black/40 z-20 backdrop-blur-[1px] transition-all duration-300 cursor-pointer"
+        />
+      )}
+
       {/* METADATA SIDE EDIT PANEL */}
       <div 
-        className={`bg-panel flex flex-col justify-between transition-all duration-300 shrink-0 ${
-          selectedItem ? "w-96 p-6 border-l border-gray-800" : "w-0 p-0 border-l-0 overflow-hidden"
+        className={`absolute right-0 top-0 h-full bg-panel/80 backdrop-blur-md flex flex-col justify-between transition-all duration-300 z-30 shadow-2xl border-l border-gray-800/40 ${
+          selectedItem ? "w-96 p-6 opacity-100" : "w-0 p-0 overflow-hidden opacity-0 pointer-events-none"
         }`}
       >
         {selectedItem && (
@@ -1204,38 +1228,7 @@ export const Library: React.FC = () => {
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-[10px] text-gray-500 tracking-wider">YEAR</label>
-                  <input
-                    type="number"
-                    value={editYear}
-                    onChange={(e) => setEditYear(parseInt(e.target.value))}
-                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
-                  />
-                </div>
 
-                <div className="flex space-x-3">
-                  <div className="flex-1 space-y-1.5">
-                    <label className="text-[10px] text-gray-500 tracking-wider">IMDB SCORE</label>
-                    <input
-                      type="text"
-                      value={editImdbScore}
-                      placeholder="e.g. 8.3"
-                      onChange={(e) => setEditImdbScore(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200 font-sans"
-                    />
-                  </div>
-                  <div className="flex-1 space-y-1.5">
-                    <label className="text-[10px] text-gray-500 tracking-wider">ROTTEN TOMATOES</label>
-                    <input
-                      type="text"
-                      value={editRtScore}
-                      placeholder="e.g. 94%"
-                      onChange={(e) => setEditRtScore(e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
-                    />
-                  </div>
-                </div>
 
                 <div className="space-y-1.5">
                   <label className="text-[10px] text-gray-500 tracking-wider">GENRES (COMMA-SEPARATED)</label>
@@ -1267,57 +1260,42 @@ export const Library: React.FC = () => {
                   />
                 </div>
 
-                <div className="space-y-1.5 relative">
-                  <label className="text-[10px] text-gray-500 tracking-wider">TAGS</label>
-                  <div 
-                    onClick={() => setIsTagsDropdownOpen(!isTagsDropdownOpen)}
-                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-accent font-bold font-mono text-xs cursor-pointer flex justify-between items-center min-h-[34px]"
-                  >
-                    <div className="flex flex-wrap gap-1">
-                      {editTags.length === 0 ? (
-                        <span className="text-gray-600 font-normal">Select tags...</span>
-                      ) : (
-                        editTags.map((tag) => (
-                          <span key={tag} className="bg-accent/15 border border-accent/30 text-accent px-1.5 py-0.5 rounded text-[9px] font-bold">
-                            {tag}
-                          </span>
-                        ))
-                      )}
-                    </div>
-                    <span className="text-gray-500 text-[10px]">{isTagsDropdownOpen ? "▲" : "▼"}</span>
-                  </div>
-
-                  {isTagsDropdownOpen && (
-                    <>
-                      {/* Invisible backdrop to close the dropdown on click outside */}
-                      <div className="fixed inset-0 z-40" onClick={() => setIsTagsDropdownOpen(false)} />
-                      <div className="absolute left-0 right-0 mt-1 bg-gray-950 border border-gray-800 rounded-lg p-2 z-50 space-y-1 shadow-2xl max-h-48 overflow-y-auto">
-                        {availableTags.map((tag) => {
-                          const isChecked = editTags.includes(tag);
-                          return (
-                            <label 
-                              key={tag} 
-                              className="flex items-center space-x-2 p-1.5 rounded hover:bg-gray-900 cursor-pointer text-xs font-mono select-none"
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-gray-500 tracking-wider">TAGS (COMMA-SEPARATED)</label>
+                  
+                  {editTags.split(",").map(t => t.trim()).filter(t => t !== "").length > 0 && (
+                    <div className="flex flex-wrap gap-1 pb-1">
+                      {editTags.split(",").map((tag, idx) => {
+                        const trimmed = tag.trim();
+                        if (!trimmed) return null;
+                        return (
+                          <span key={`${trimmed}-${idx}`} className="bg-accent/15 border border-accent/30 text-accent px-1.5 py-0.5 rounded text-[9px] font-bold font-mono flex items-center space-x-1 shadow-sm">
+                            <span>{trimmed}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newTags = editTags.split(",")
+                                  .map(t => t.trim())
+                                  .filter((_, i) => i !== idx);
+                                setEditTags(newTags.join(", "));
+                              }}
+                              className="text-accent/50 hover:text-accent focus:outline-none text-[9px] font-sans font-bold pl-0.5"
                             >
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => {
-                                  if (isChecked) {
-                                    setEditTags(editTags.filter((t) => t !== tag));
-                                  } else {
-                                    setEditTags([...editTags, tag]);
-                                  }
-                                }}
-                                className="rounded border-gray-800 text-accent focus:ring-accent accent-accent"
-                              />
-                              <span className={isChecked ? "text-accent font-bold" : "text-gray-400"}>{tag}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </>
+                              ×
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </div>
                   )}
+
+                  <input
+                    type="text"
+                    value={editTags}
+                    onChange={(e) => setEditTags(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-accent font-bold font-mono text-xs"
+                    placeholder="e.g. Classic, Shorts, Animation"
+                  />
                 </div>
 
                 <div className="space-y-1.5">
@@ -1386,7 +1364,7 @@ export const Library: React.FC = () => {
                     </div>
 
                     {osResults.length > 0 && (
-                      <div className="bg-gray-950 rounded border border-gray-900 p-2 max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
+                      <div className="bg-gray-950 rounded border border-gray-900 p-2 max-h-64 overflow-y-auto space-y-1.5 scrollbar-thin">
                         {osResults.map((result) => {
                           const isDownloading = downloadingOsId === result.file_id;
                           return (

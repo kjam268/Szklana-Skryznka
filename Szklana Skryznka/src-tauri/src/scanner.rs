@@ -18,6 +18,7 @@ pub struct OnlineMetadata {
     pub runtime: Option<i32>,
     pub rt_score: Option<String>,
     pub imdb_score: Option<String>,
+    pub imdb_id: Option<String>,
 }
 
 /// Helper to parse frame rates like "24/1" or "23976/1000" into f64
@@ -127,6 +128,7 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
                     runtime,
                     rt_score,
                     imdb_score,
+                    imdb_id: None,
                 });
             }
         }
@@ -199,6 +201,7 @@ async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineM
                             runtime: None,
                             rt_score,
                             imdb_score,
+                            imdb_id: None,
                         });
                     }
                 }
@@ -305,6 +308,7 @@ pub async fn fetch_online_metadata(
                                     let mut cast = Vec::new();
                                     let mut genres = Vec::new();
                                     let mut online_runtime = None;
+                                    let mut imdb_id = None;
 
                                     match detail_req.send().await {
                                         Ok(detail_res) => {
@@ -314,6 +318,7 @@ pub async fn fetch_online_metadata(
                                             }
                                             match detail_res.json::<Value>().await {
                                                 Ok(detail_parsed) => {
+                                                    imdb_id = detail_parsed["imdb_id"].as_str().map(|s| s.to_string());
                                                     if let Some(genres_arr) = detail_parsed["genres"].as_array() {
                                                         for g in genres_arr {
                                                             if let Some(name) = g["name"].as_str() {
@@ -378,6 +383,7 @@ pub async fn fetch_online_metadata(
                                         runtime: online_runtime,
                                         rt_score,
                                         imdb_score,
+                                        imdb_id,
                                     };
                                 } else {
                                     eprintln!("TMDb search returned no results for title: {}", search_title);
@@ -422,6 +428,7 @@ pub async fn fetch_online_metadata(
             runtime: Some(8160),
             rt_score: Some("88%".to_string()),
             imdb_score: Some("8.7".to_string()),
+            imdb_id: None,
         }
     } else if title_l.contains("interstellar") {
         OnlineMetadata {
@@ -435,6 +442,7 @@ pub async fn fetch_online_metadata(
             runtime: Some(10140),
             rt_score: Some("73%".to_string()),
             imdb_score: Some("8.7".to_string()),
+            imdb_id: None,
         }
     } else if title_l.contains("inception") {
         OnlineMetadata {
@@ -448,6 +456,7 @@ pub async fn fetch_online_metadata(
             runtime: Some(8880),
             rt_score: Some("87%".to_string()),
             imdb_score: Some("8.8".to_string()),
+            imdb_id: None,
         }
     } else if title_l.contains("blade runner") {
         OnlineMetadata {
@@ -461,6 +470,7 @@ pub async fn fetch_online_metadata(
             runtime: Some(9840),
             rt_score: Some("88%".to_string()),
             imdb_score: Some("8.0".to_string()),
+            imdb_id: None,
         }
     } else {
         // Generic fallback values
@@ -488,6 +498,7 @@ pub async fn fetch_online_metadata(
             runtime: None,
             rt_score,
             imdb_score,
+            imdb_id: None,
         }
     }
 }
@@ -995,6 +1006,129 @@ pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+async fn merge_duplicate_item_ids(pool: &SqlitePool, item_ids: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if item_ids.len() <= 1 {
+        return Ok(());
+    }
+
+    // Find the best media item from the list (the one whose media file has the highest quality score)
+    let mut best_item_id = item_ids[0].clone();
+    let mut best_score = -1.0;
+
+    for id in &item_ids {
+        let score: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(quality_score), 0.0) FROM media_files WHERE media_item_id = $1"
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0.0);
+
+        if score > best_score {
+            best_score = score;
+            best_item_id = id.clone();
+        }
+    }
+
+    // Move files/subtitles to best_item_id and delete duplicate records
+    for id in &item_ids {
+        if id == &best_item_id {
+            continue;
+        }
+
+        let _ = sqlx::query("UPDATE media_files SET media_item_id = $1 WHERE media_item_id = $2")
+            .bind(&best_item_id)
+            .bind(id)
+            .execute(pool)
+            .await?;
+
+        let _ = sqlx::query("UPDATE subtitles SET media_item_id = $1 WHERE media_item_id = $2")
+            .bind(&best_item_id)
+            .bind(id)
+            .execute(pool)
+            .await?;
+
+        let _ = sqlx::query("DELETE FROM media_genres WHERE media_item_id = $1").bind(id).execute(pool).await?;
+        let _ = sqlx::query("DELETE FROM media_tags WHERE media_item_id = $1").bind(id).execute(pool).await?;
+        let _ = sqlx::query("DELETE FROM media_actors WHERE media_item_id = $1").bind(id).execute(pool).await?;
+        let _ = sqlx::query("DELETE FROM media_items WHERE id = $1").bind(id).execute(pool).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn run_second_layer_deduplication(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("Running second-layer database de-duplication pass...");
+
+    // 1. Group duplicates by poster_path
+    let duplicate_posters: Vec<String> = sqlx::query_scalar(
+        "SELECT poster_path FROM media_items WHERE poster_path IS NOT NULL AND poster_path != '' GROUP BY poster_path HAVING COUNT(*) > 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for poster in duplicate_posters {
+        let items = sqlx::query(
+            "SELECT id FROM media_items WHERE poster_path = $1"
+        )
+        .bind(&poster)
+        .fetch_all(pool)
+        .await?;
+
+        if items.len() > 1 {
+            let item_ids: Vec<String> = items.iter().map(|r| r.get("id")).collect();
+            merge_duplicate_item_ids(pool, item_ids).await?;
+        }
+    }
+
+    // 2. Group duplicates by synopsis
+    let duplicate_synopses: Vec<String> = sqlx::query_scalar(
+        "SELECT synopsis FROM media_items WHERE synopsis IS NOT NULL AND synopsis != '' AND length(synopsis) > 50 GROUP BY synopsis HAVING COUNT(*) > 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for synopsis in duplicate_synopses {
+        let items = sqlx::query(
+            "SELECT id FROM media_items WHERE synopsis = $1"
+        )
+        .bind(&synopsis)
+        .fetch_all(pool)
+        .await?;
+
+        if items.len() > 1 {
+            let item_ids: Vec<String> = items.iter().map(|r| r.get("id")).collect();
+            merge_duplicate_item_ids(pool, item_ids).await?;
+        }
+    }
+
+    // 3. Group duplicates by imdb_id
+    let duplicate_imdb_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT imdb_id FROM media_items WHERE imdb_id IS NOT NULL AND imdb_id != '' GROUP BY imdb_id HAVING COUNT(*) > 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for imdb in duplicate_imdb_ids {
+        let items = sqlx::query(
+            "SELECT id FROM media_items WHERE imdb_id = $1"
+        )
+        .bind(&imdb)
+        .fetch_all(pool)
+        .await?;
+
+        if items.len() > 1 {
+            let item_ids: Vec<String> = items.iter().map(|r| r.get("id")).collect();
+            merge_duplicate_item_ids(pool, item_ids).await?;
+        }
+    }
+
+    // 4. Run standard deduplicate pass
+    let _ = deduplicate_database(pool).await?;
+
+    Ok(())
+}
+
 use tauri::Emitter;
 
 /// Main library scanner service running in background
@@ -1146,8 +1280,8 @@ pub async fn scan_directory(
             let new_item_id = format!("item_{}", uuid::Uuid::new_v4());
             let final_runtime = online.runtime.unwrap_or(0);
             sqlx::query(
-                "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path, rt_score, imdb_score) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+                "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path, rt_score, imdb_score, imdb_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
             )
             .bind(&new_item_id)
             .bind(&title)
@@ -1161,6 +1295,7 @@ pub async fn scan_directory(
             .bind(&online.backdrop_path)
             .bind(&online.rt_score)
             .bind(&online.imdb_score)
+            .bind(&online.imdb_id)
             .execute(pool)
             .await?;
 

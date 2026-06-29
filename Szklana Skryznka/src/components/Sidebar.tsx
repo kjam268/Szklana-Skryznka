@@ -152,7 +152,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       <aside 
         onMouseEnter={() => setIsCollapsed(false)}
         onMouseLeave={() => setIsCollapsed(true)}
-        className={`absolute left-0 top-0 h-screen bg-panel/90 backdrop-blur-lg border-r border-gray-800 flex flex-col justify-between transition-all duration-300 z-30 ${
+        className={`absolute left-0 top-0 h-screen bg-panel/80 backdrop-blur-md border-r border-gray-800 flex flex-col justify-between transition-all duration-300 z-30 ${
           isCollapsed ? "w-16 shadow-none" : "w-64 shadow-[10px_0_30px_rgba(0,0,0,0.6)]"
         }`}
       >

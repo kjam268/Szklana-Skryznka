@@ -138,7 +138,7 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
     sqlx::query(
         "UPDATE media_items SET title = $1, original_title = $2, media_type = $3, year = $4, \
          runtime = $5, synopsis = $6, rating = $7, poster_path = $8, backdrop_path = $9, updated_at = $10, \
-         rt_score = $11, imdb_score = $12 WHERE id = $13"
+         rt_score = $11, imdb_score = $12, imdb_id = $13 WHERE id = $14"
     )
     .bind(&details.item.title)
     .bind(&details.item.original_title)
@@ -152,6 +152,7 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
     .bind(Utc::now().to_rfc3339())
     .bind(&details.item.rt_score)
     .bind(&details.item.imdb_score)
+    .bind(&details.item.imdb_id)
     .bind(&details.item.id)
     .execute(&*pool)
     .await
@@ -955,7 +956,7 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
         .unwrap_or(0);
 
     let mut auto_tags = Vec::new();
-    if item.media_type == "Movie" {
+    if item.media_type == "Movie" && !(duration > 0 && duration < 1800) {
         auto_tags.push("Movie".to_string());
     }
     if item.media_type == "Episode" || item.media_type == "TVShow" || item.media_type == "Anime" {
@@ -1125,7 +1126,7 @@ pub async fn search_opensubtitles(pool: DbState<'_>, item_id: String) -> Result<
         .unwrap_or_else(|_| reqwest::Client::new());
 
     let mut search_url = format!(
-        "https://api.opensubtitles.com/api/v1/subtitles?query={}",
+        "https://api.opensubtitles.com/api/v1/subtitles?query={}&languages=en,fr",
         crate::scanner::urlencode(&item.title)
     );
     if let Some(y) = item.year {
@@ -1174,6 +1175,21 @@ pub async fn search_opensubtitles(pool: DbState<'_>, item_id: String) -> Result<
             }
         }
     }
+
+    // Prioritize language: "fr" first, then "en", then others
+    results.sort_by(|a, b| {
+        let a_priority = match a.language.as_str() {
+            "fr" => 0,
+            "en" => 1,
+            _ => 2,
+        };
+        let b_priority = match b.language.as_str() {
+            "fr" => 0,
+            "en" => 1,
+            _ => 2,
+        };
+        a_priority.cmp(&b_priority)
+    });
 
     Ok(results)
 }

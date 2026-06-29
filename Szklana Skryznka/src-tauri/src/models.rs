@@ -40,6 +40,7 @@ pub struct MediaItem {
     pub updated_at: String,
     pub rt_score: Option<String>,
     pub imdb_score: Option<String>,
+    pub imdb_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
