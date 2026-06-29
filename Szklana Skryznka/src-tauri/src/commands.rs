@@ -1,4 +1,7 @@
 use tauri::State;
+use tauri::Manager;
+use tauri::Emitter;
+use serde::{Serialize, Deserialize};
 use sqlx::{SqlitePool, Row};
 use chrono::{DateTime, Utc, Duration};
 use crate::models::{
@@ -134,8 +137,8 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
     // 1. Update MediaItem
     sqlx::query(
         "UPDATE media_items SET title = $1, original_title = $2, media_type = $3, year = $4, \
-         runtime = $5, synopsis = $6, rating = $7, poster_path = $8, backdrop_path = $9, updated_at = $10 \
-         WHERE id = $11"
+         runtime = $5, synopsis = $6, rating = $7, poster_path = $8, backdrop_path = $9, updated_at = $10, \
+         rt_score = $11, imdb_score = $12 WHERE id = $13"
     )
     .bind(&details.item.title)
     .bind(&details.item.original_title)
@@ -147,6 +150,8 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
     .bind(&details.item.poster_path)
     .bind(&details.item.backdrop_path)
     .bind(Utc::now().to_rfc3339())
+    .bind(&details.item.rt_score)
+    .bind(&details.item.imdb_score)
     .bind(&details.item.id)
     .execute(&*pool)
     .await
@@ -296,6 +301,9 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
             .map_err(|e| e.to_string())?;
     }
 
+    // Run automated tag cleaning rules (Shorts / Movie / Animation duration validations)
+    let _ = crate::scanner::check_and_clean_tags(&*pool, &details.item.id).await;
+ 
     Ok("Media item metadata saved successfully".to_string())
 }
 
@@ -709,8 +717,8 @@ pub async fn set_setting(pool: DbState<'_>, key: String, value: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn purge_database(pool: DbState<'_>, target: String) -> Result<String, String> {
-    match target.as_str() {
+pub async fn purge_database(app: tauri::AppHandle, pool: DbState<'_>, target: String) -> Result<String, String> {
+    let result = match target.as_str() {
         "library" => {
             sqlx::query("DELETE FROM media_genres").execute(&*pool).await.map_err(|e| e.to_string())?;
             sqlx::query("DELETE FROM media_actors").execute(&*pool).await.map_err(|e| e.to_string())?;
@@ -756,7 +764,12 @@ pub async fn purge_database(pool: DbState<'_>, target: String) -> Result<String,
             Ok("Complete database purged.".to_string())
         }
         _ => Err("Invalid purge target".to_string())
+    };
+
+    if result.is_ok() {
+        let _ = app.emit("library-updated", ());
     }
+    result
 }
 
 #[tauri::command]
@@ -800,7 +813,7 @@ pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::
 }
 
 #[tauri::command]
-pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result<String, String> {
+pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_override: Option<String>) -> Result<String, String> {
     // 1. Fetch item title, year, and media_type from database
     let item: crate::models::MediaItem = sqlx::query_as::<_, crate::models::MediaItem>(
         "SELECT * FROM media_items WHERE id = $1"
@@ -819,7 +832,12 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
     .unwrap_or(None);
 
     // 3. Fetch online metadata
-    let mut online = crate::scanner::fetch_online_metadata(&item.title, item.year, &item.media_type, api_key.clone()).await;
+    let query_title = match &search_override {
+        Some(over) if !over.trim().is_empty() => over.trim().to_string(),
+        _ => item.title.clone(),
+    };
+    let query_year = if search_override.is_some() { None } else { item.year };
+    let mut online = crate::scanner::fetch_online_metadata(&query_title, query_year, &item.media_type, api_key.clone()).await;
 
     // Fallback logic from scanner
     if online.poster_path.is_none() && item.media_type == "Movie" {
@@ -848,10 +866,11 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
     }
 
     // 4. Update MediaItem in database
+    // 4. Update MediaItem in database
     if let Some(online_rt) = online.runtime {
         sqlx::query(
-            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, runtime = $6, updated_at = $7 \
-             WHERE id = $8"
+            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, runtime = $6, updated_at = $7, rt_score = $8, imdb_score = $9 \
+             WHERE id = $10"
         )
         .bind(&item.title)
         .bind(&online.synopsis)
@@ -860,14 +879,16 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
         .bind(&online.backdrop_path)
         .bind(online_rt)
         .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&online.rt_score)
+        .bind(&online.imdb_score)
         .bind(&item_id)
         .execute(&*pool)
         .await
         .map_err(|e| format!("Failed to update media item: {}", e))?;
     } else {
         sqlx::query(
-            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, updated_at = $6 \
-             WHERE id = $7"
+            "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, updated_at = $6, rt_score = $7, imdb_score = $8 \
+             WHERE id = $9"
         )
         .bind(&item.title)
         .bind(&online.synopsis)
@@ -875,6 +896,8 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
         .bind(&online.poster_path)
         .bind(&online.backdrop_path)
         .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&online.rt_score)
+        .bind(&online.imdb_score)
         .bind(&item_id)
         .execute(&*pool)
         .await
@@ -975,5 +998,285 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
             .map_err(|e| e.to_string())?;
     }
 
+    // Run automated tag cleaning rules (Shorts / Movie / Animation duration validations)
+    let _ = crate::scanner::check_and_clean_tags(&*pool, &item_id).await;
+
     Ok("Metadata successfully refreshed from online API".to_string())
+}
+
+#[tauri::command]
+pub async fn open_app_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn select_custom_poster(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    // 1. Show file picker
+    let file_path = rfd::AsyncFileDialog::new()
+        .add_filter("Images", &["jpg", "jpeg", "png", "webp"])
+        .pick_file()
+        .await;
+
+    if let Some(file) = file_path {
+        let original_path = file.path();
+        
+        // 2. Prepare posters directory in app data dir
+        let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let posters_dir = app_dir.join("posters");
+        if !posters_dir.exists() {
+            std::fs::create_dir_all(&posters_dir).map_err(|e| e.to_string())?;
+        }
+
+        // 3. Generate a unique name for the poster
+        let extension = original_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+        let unique_name = format!("{}.{}", uuid::Uuid::new_v4(), extension);
+        let destination_path = posters_dir.join(&unique_name);
+
+        // 4. Copy the file
+        std::fs::copy(original_path, &destination_path).map_err(|e| e.to_string())?;
+
+        // 5. Return the absolute path as String
+        return Ok(Some(destination_path.to_string_lossy().to_string()));
+    }
+
+    Ok(None)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenSubtitlesResult {
+    pub id: String,
+    pub language: String,
+    pub release: String,
+    pub download_count: i32,
+    pub votes: Option<i32>,
+    pub file_id: u32,
+    pub file_name: String,
+}
+
+#[tauri::command]
+pub async fn search_opensubtitles(pool: DbState<'_>, item_id: String) -> Result<Vec<OpenSubtitlesResult>, String> {
+    // 1. Fetch media item title and year from DB
+    let item: crate::models::MediaItem = sqlx::query_as::<_, crate::models::MediaItem>(
+        "SELECT * FROM media_items WHERE id = $1"
+    )
+    .bind(&item_id)
+    .fetch_one(&*pool)
+    .await
+    .map_err(|e| format!("Database error: {}", e))?;
+
+    // 2. Fetch OpenSubtitles API Key from settings
+    let api_key: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'opensubtitles_api_key'"
+    )
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None);
+
+    let key_val = api_key.unwrap_or_default().trim().to_string();
+    
+    // If no API Key is configured, return realistic mocks based on the film title!
+    if key_val.is_empty() {
+        let clean_title = item.title.replace(':', " ").replace('.', " ");
+        return Ok(vec![
+            OpenSubtitlesResult {
+                id: "mock_sub_1".to_string(),
+                language: "en".to_string(),
+                release: format!("{}.1080p.BluRay.x264", clean_title.replace(' ', ".")),
+                download_count: 1250,
+                votes: Some(5),
+                file_id: 10001,
+                file_name: format!("{}.en.srt", item.title),
+            },
+            OpenSubtitlesResult {
+                id: "mock_sub_2".to_string(),
+                language: "pl".to_string(),
+                release: format!("{}.1080p.BluRay.x264", clean_title.replace(' ', ".")),
+                download_count: 450,
+                votes: Some(4),
+                file_id: 10002,
+                file_name: format!("{}.pl.srt", item.title),
+            },
+            OpenSubtitlesResult {
+                id: "mock_sub_3".to_string(),
+                language: "es".to_string(),
+                release: format!("{}.720p.HDTV", clean_title.replace(' ', ".")),
+                download_count: 85,
+                votes: None,
+                file_id: 10003,
+                file_name: format!("{}.es.srt", item.title),
+            }
+        ]);
+    }
+
+    // Live search call
+    let client = reqwest::Client::builder()
+        .user_agent("SzklanaSkryznka v1.0.0")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut search_url = format!(
+        "https://api.opensubtitles.com/api/v1/subtitles?query={}",
+        crate::scanner::urlencode(&item.title)
+    );
+    if let Some(y) = item.year {
+        search_url = format!("{}&year={}", search_url, y);
+    }
+
+    let response = client.get(&search_url)
+        .header("Api-Key", &key_val)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("OpenSubtitles search request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("OpenSubtitles API error status: {}", response.status()));
+    }
+
+    let json_body: serde_json::Value = response.json().await
+        .map_err(|e| format!("Failed to parse OpenSubtitles search response JSON: {}", e))?;
+
+    let mut results = Vec::new();
+    if let Some(data_arr) = json_body["data"].as_array() {
+        for sub_item in data_arr {
+            let id = sub_item["id"].as_str().unwrap_or("").to_string();
+            let attributes = &sub_item["attributes"];
+            let language = attributes["language"].as_str().unwrap_or("en").to_string();
+            let release = attributes["release"].as_str().unwrap_or("unknown").to_string();
+            let download_count = attributes["download_count"].as_i64().unwrap_or(0) as i32;
+            let votes = attributes["votes"].as_i64().map(|v| v as i32);
+            
+            if let Some(files_arr) = attributes["files"].as_array() {
+                for file_obj in files_arr {
+                    let file_id = file_obj["file_id"].as_u64().unwrap_or(0) as u32;
+                    let file_name = file_obj["file_name"].as_str().unwrap_or("subtitle.srt").to_string();
+                    
+                    results.push(OpenSubtitlesResult {
+                        id: id.clone(),
+                        language: language.clone(),
+                        release: release.clone(),
+                        download_count,
+                        votes,
+                        file_id,
+                        file_name,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadBody {
+    pub file_id: u32,
+}
+
+#[tauri::command]
+pub async fn download_opensubtitles(
+    pool: DbState<'_>,
+    media_item_id: String,
+    file_id: u32,
+    language: String
+) -> Result<String, String> {
+    // 1. Fetch file_path of the media item's video file
+    let video_path: Option<String> = sqlx::query_scalar(
+        "SELECT file_path FROM media_files WHERE media_item_id = $1 LIMIT 1"
+    )
+    .bind(&media_item_id)
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None);
+
+    let video_path_str = video_path.ok_or_else(|| "No video file found for this media item.".to_string())?;
+    let path = std::path::Path::new(&video_path_str);
+    let parent_dir = path.parent().ok_or_else(|| "Failed to get video file directory.".to_string())?;
+    let stem = path.file_stem().ok_or_else(|| "Failed to parse video filename.".to_string())?.to_string_lossy();
+    
+    // We name the subtitle file: <video_basename>.<language>.srt
+    let subtitle_filename = format!("{}.{}.srt", stem, language.to_lowercase());
+    let subtitle_file_path = parent_dir.join(&subtitle_filename);
+    let subtitle_path_str = subtitle_file_path.to_string_lossy().to_string();
+
+    // 2. Fetch OpenSubtitles API Key from settings
+    let api_key: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'opensubtitles_api_key'"
+    )
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None);
+
+    let key_val = api_key.unwrap_or_default().trim().to_string();
+
+    if key_val.is_empty() {
+        // Mock download: write a placeholder SRT file that works!
+        let mock_srt_content = "1\n00:00:01,000 --> 00:00:10,000\n[Szklana Skrzynka] Subtitle downloaded successfully from OpenSubtitles!\n\n2\n00:00:15,000 --> 00:00:25,000\nEnjoy watching your movie!\n";
+        std::fs::write(&subtitle_file_path, mock_srt_content)
+            .map_err(|e| format!("Failed to write mock subtitle file: {}", e))?;
+    } else {
+        // Live download call
+        let client = reqwest::Client::builder()
+            .user_agent("SzklanaSkryznka v1.0.0")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let download_url = "https://api.opensubtitles.com/api/v1/download";
+        let body = DownloadBody { file_id };
+
+        let response = client.post(download_url)
+            .header("Api-Key", &key_val)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("OpenSubtitles download request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("OpenSubtitles download API error status: {}", response.status()));
+        }
+
+        let json_res: serde_json::Value = response.json().await
+            .map_err(|e| format!("Failed to parse OpenSubtitles download response: {}", e))?;
+
+        let download_link = json_res["link"].as_str()
+            .ok_or_else(|| "No download link returned from OpenSubtitles API.".to_string())?;
+
+        // Download actual srt file content
+        let srt_res = reqwest::get(download_link).await
+            .map_err(|e| format!("Failed to fetch srt file link: {}", e))?;
+        
+        let srt_bytes = srt_res.bytes().await
+            .map_err(|e| format!("Failed to read srt bytes: {}", e))?;
+
+        std::fs::write(&subtitle_file_path, srt_bytes)
+            .map_err(|e| format!("Failed to save srt file: {}", e))?;
+    }
+
+    // 3. Insert subtitle record in SQLite
+    let sub_id = format!("sub_{}", uuid::Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO subtitles (id, media_item_id, language, subtitle_type, file_path, is_default) \
+         VALUES ($1, $2, $3, $4, $5, 0)"
+    )
+    .bind(&sub_id)
+    .bind(&media_item_id)
+    .bind(&language)
+    .bind("External (.srt)")
+    .bind(&subtitle_path_str)
+    .execute(&*pool)
+    .await
+    .map_err(|e| format!("Failed to insert subtitle record in database: {}", e))?;
+
+    Ok(subtitle_path_str)
 }

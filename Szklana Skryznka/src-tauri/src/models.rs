@@ -38,6 +38,8 @@ pub struct MediaItem {
     pub director_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub rt_score: Option<String>,
+    pub imdb_score: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -58,6 +60,8 @@ pub struct MediaFile {
     pub audio_language: Option<String>,
     pub quality_score: Option<f64>,
     pub quality_score_done: Option<i32>,
+    pub audio_tracks: Option<String>,
+    pub embedded_subtitles: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

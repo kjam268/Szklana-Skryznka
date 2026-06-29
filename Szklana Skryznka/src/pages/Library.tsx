@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, MediaItemDetails, Subtitle } from "../store";
-import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw, Crown } from "lucide-react";
+import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw, Crown, Heart } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -49,6 +49,13 @@ export const Library: React.FC = () => {
   const [editPoster, setEditPoster] = useState("");
   const [editBackdrop, setEditBackdrop] = useState("");
   const [editGenres, setEditGenres] = useState("");
+  const [editRtScore, setEditRtScore] = useState("");
+  const [editImdbScore, setEditImdbScore] = useState("");
+  const [sortBy, setSortBy] = useState("alphabetical");
+  const [manualSearchQuery, setManualSearchQuery] = useState("");
+  const [osResults, setOsResults] = useState<any[]>([]);
+  const [isSearchingOs, setIsSearchingOs] = useState(false);
+  const [downloadingOsId, setDownloadingOsId] = useState<number | null>(null);
 
   // Subtitle import fields
   const [subLang, setSubLang] = useState("en");
@@ -80,12 +87,24 @@ export const Library: React.FC = () => {
     const setupListener = async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlisten = await listen("library-updated", () => {
+        const unlistenLib = await listen("library-updated", () => {
           fetchItems(true);
         });
-        unlistenFn = unlisten;
+        
+        const unlistenSelect = await listen<string>("select-media-item", (event) => {
+          const itemId = event.payload;
+          const targetItem = useLibraryStore.getState().items.find(i => i.item.id === itemId);
+          if (targetItem) {
+            handleSelectCard(targetItem);
+          }
+        });
+
+        unlistenFn = () => {
+          unlistenLib();
+          unlistenSelect();
+        };
       } catch (e) {
-        console.error("Failed to setup library-updated listener:", e);
+        console.error("Failed to setup listeners:", e);
       }
     };
     setupListener();
@@ -127,6 +146,9 @@ export const Library: React.FC = () => {
     setEditTags(details.tags);
     setEditDirectors((details.directors || []).join(", "));
     setEditActors((details.actors || []).join(", "));
+    setEditRtScore(details.item.rt_score || "");
+    setEditImdbScore(details.item.imdb_score || "");
+    setManualSearchQuery("");
   };
 
   const handleSaveMetadata = async () => {
@@ -143,6 +165,8 @@ export const Library: React.FC = () => {
         rating: editRating,
         poster_path: editPoster,
         backdrop_path: editBackdrop,
+        rt_score: editRtScore || null,
+        imdb_score: editImdbScore || null,
       },
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
       tags: (() => {
@@ -180,6 +204,56 @@ export const Library: React.FC = () => {
       await fetchItems();
     } catch (e) {
       alert(`Import failed: ${e}`);
+    }
+  };
+
+  const handleSearchOpenSubtitles = async () => {
+    if (!selectedItem) return;
+    setIsSearchingOs(true);
+    setOsResults([]);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const results = await invoke<any[]>("search_opensubtitles", { itemId: selectedItem.item.id });
+      setOsResults(results);
+      if (results.length === 0) {
+        alert("No subtitles found on OpenSubtitles for this item.");
+      }
+    } catch (e) {
+      console.error("OpenSubtitles search failed:", e);
+      alert(`Search failed: ${e}`);
+    } finally {
+      setIsSearchingOs(false);
+    }
+  };
+
+  const handleDownloadOpenSubtitles = async (fileId: number, language: string) => {
+    if (!selectedItem) return;
+    setDownloadingOsId(fileId);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("download_opensubtitles", {
+        mediaItemId: selectedItem.item.id,
+        fileId,
+        language
+      });
+      alert(`Successfully downloaded and imported ${language.toUpperCase()} subtitle track!`);
+      
+      // Refresh library list
+      await fetchItems(true);
+      
+      // Update selected item detail with the newly fetched database state
+      const updated = useLibraryStore.getState().items.find(i => i.item.id === selectedItem.item.id);
+      if (updated) {
+        setSelectedItem(updated);
+      }
+      
+      // Remove downloaded item from search results
+      setOsResults(prev => prev.filter(r => r.file_id !== fileId));
+    } catch (e) {
+      console.error("OpenSubtitles download failed:", e);
+      alert(`Download failed: ${e}`);
+    } finally {
+      setDownloadingOsId(null);
     }
   };
 
@@ -239,6 +313,36 @@ export const Library: React.FC = () => {
     return titleMatch && tagMatch;
   });
 
+  const sortedFilteredItems = [...filteredItems].sort((a, b) => {
+    if (sortBy === "alphabetical") {
+      return a.item.title.localeCompare(b.item.title);
+    }
+    if (sortBy === "quality_score") {
+      const qA = a.files?.[0]?.quality_score ?? 0;
+      const qB = b.files?.[0]?.quality_score ?? 0;
+      return qB - qA;
+    }
+    if (sortBy === "imdb_score") {
+      const imdbA = parseFloat(a.item.imdb_score || "0");
+      const imdbB = parseFloat(b.item.imdb_score || "0");
+      return imdbB - imdbA;
+    }
+    if (sortBy === "rotten_tomatoes") {
+      const rtA = parseInt(a.item.rt_score?.replace("%", "") || "0");
+      const rtB = parseInt(b.item.rt_score?.replace("%", "") || "0");
+      return rtB - rtA;
+    }
+    if (sortBy === "duration") {
+      const durA = a.item.runtime ?? 0;
+      const durB = b.item.runtime ?? 0;
+      return durB - durA;
+    }
+    if (sortBy === "date_added") {
+      return (b.item.created_at || "").localeCompare(a.item.created_at || "");
+    }
+    return 0;
+  });
+
   const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Animation", "Shorts", "Favorites", "Kids", "Classic", "Not Found"];
 
   const getPosterUrl = (path?: string) => {
@@ -288,7 +392,7 @@ export const Library: React.FC = () => {
           </div>
 
           {/* SEARCH & FILTER FILTERS */}
-          <div className="flex space-x-4">
+          <div className="flex space-x-4 items-center">
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-2.5 text-gray-500" size={16} />
               <input
@@ -299,7 +403,25 @@ export const Library: React.FC = () => {
                 className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent"
               />
             </div>
-             <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
+            
+            {/* Sort Dropdown */}
+            <div className="flex items-center space-x-2 shrink-0 bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-xs focus-within:border-accent">
+              <span className="text-gray-500 text-[10px] tracking-widest font-extrabold uppercase">SORT BY:</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="bg-transparent text-gray-200 focus:outline-none cursor-pointer font-sans"
+              >
+                <option value="alphabetical" className="bg-gray-950 text-gray-200">Alphabetical</option>
+                <option value="quality_score" className="bg-gray-950 text-gray-200">Quality Score</option>
+                <option value="imdb_score" className="bg-gray-950 text-gray-200">IMDb Score</option>
+                <option value="rotten_tomatoes" className="bg-gray-950 text-gray-200">Rotten Tomatoes</option>
+                <option value="duration" className="bg-gray-950 text-gray-200">Duration</option>
+                <option value="date_added" className="bg-gray-950 text-gray-200">Date Added</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
               {libraryTabs.map((tab) => {
                 const isNotFound = tab === "Not Found";
                 let btnStyle = "";
@@ -334,7 +456,6 @@ export const Library: React.FC = () => {
               })}
             </div>
           </div>
-        </div>
 
         {/* SCAN STATUS LOGS OVERLAY */}
         {isScanning && (
@@ -425,15 +546,59 @@ export const Library: React.FC = () => {
                                   <span className="text-[10px] text-gray-500">NO ART</span>
                                 </div>
                               )}
-                              <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start">
-                                <div className="text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
-                                  {details.item.media_type.toUpperCase()}
-                                </div>
+                              
+                              {/* Favorites Star Toggle Overlay (Top Right) */}
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  const isFav = details.tags.includes("Favorites");
+                                  let newTags;
+                                  if (isFav) {
+                                    newTags = details.tags.filter(t => t !== "Favorites");
+                                  } else {
+                                    newTags = [...details.tags, "Favorites"];
+                                  }
+                                  
+                                  try {
+                                    const updatedDetails = {
+                                      ...details,
+                                      tags: newTags,
+                                    };
+                                    const { invoke } = await import("@tauri-apps/api/core");
+                                    await invoke("save_media", { details: updatedDetails });
+                                    await fetchItems(true);
+                                  } catch (err) {
+                                    console.error("Failed to toggle favorite:", err);
+                                  }
+                                }}
+                                className="absolute top-2 right-2 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                                title={details.tags.includes("Favorites") ? "Remove from Favorites" : "Mark as Favorite"}
+                              >
+                                <Star 
+                                  size={15} 
+                                  className={details.tags.includes("Favorites") ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
+                                />
+                              </button>
+
+                              {/* Overlaid Tag Badges (Top Left) */}
+                              <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
+                                {details.tags && details.tags.map((tag) => {
+                                  if (tag === "Favorites") return null;
+                                  let tagStyle = "bg-accent/90 text-white border border-accent/20";
+                                  if (tag === "Animation") tagStyle = "bg-violet-600/90 text-white border border-violet-400/20";
+                                  else if (tag === "Shorts") tagStyle = "bg-teal-600/90 text-white border border-teal-400/20";
+                                  else if (tag === "Documentary") tagStyle = "bg-amber-600/90 text-white border border-amber-400/20";
+                                  return (
+                                    <div key={tag} className={`text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase ${tagStyle}`}>
+                                      {tag}
+                                    </div>
+                                  );
+                                })}
                                 {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                                  <div className={`text-[9px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
+                                  <div className={`text-[8px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
                                     details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
                                   }`}>
-                                    <Crown size={9} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
+                                    <Crown size={8} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
                                     <span>{Math.round(details.files[0].quality_score)}</span>
                                   </div>
                                 )}
@@ -493,10 +658,44 @@ export const Library: React.FC = () => {
                                 <span className="text-[10px] text-gray-500">NO ART</span>
                               </div>
                             )}
-                            <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
-                              SEASON {sNum}
-                            </div>
-                          </div>
+                             <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
+                               SEASON {sNum}
+                             </div>
+
+                             {/* Favorites Star Toggle Overlay (Top Right) */}
+                             <button
+                               onClick={async (e) => {
+                                 e.stopPropagation();
+                                 const isFav = seasonGroup.some(details => details.tags.includes("Favorites"));
+                                 try {
+                                   const { invoke } = await import("@tauri-apps/api/core");
+                                   for (const details of seasonGroup) {
+                                     const alreadyFav = details.tags.includes("Favorites");
+                                     let newTags;
+                                     if (isFav && alreadyFav) {
+                                       newTags = details.tags.filter(t => t !== "Favorites");
+                                     } else if (!isFav && !alreadyFav) {
+                                       newTags = [...details.tags, "Favorites"];
+                                     } else {
+                                       continue;
+                                     }
+                                     const updatedDetails = { ...details, tags: newTags };
+                                     await invoke("save_media", { details: updatedDetails });
+                                   }
+                                   await fetchItems(true);
+                                 } catch (err) {
+                                   console.error("Failed to toggle favorite for season:", err);
+                                 }
+                               }}
+                               className="absolute top-2 right-2 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                               title={seasonGroup.some(details => details.tags.includes("Favorites")) ? "Remove Season from Favorites" : "Mark Season as Favorite"}
+                             >
+                               <Star 
+                                 size={15} 
+                                 className={seasonGroup.some(details => details.tags.includes("Favorites")) ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
+                               />
+                             </button>
+                           </div>
                           <div className="p-3 space-y-1">
                             <div className="text-xs font-bold text-gray-200 truncate">Season {sNum}</div>
                             <div className="flex justify-between items-center text-[10px] text-accent">
@@ -514,7 +713,7 @@ export const Library: React.FC = () => {
             (() => {
               // Level 1 TV Shows list for "TV show" Tab (Only TV Show folder cards)
               const groupedShows: { [showName: string]: MediaItemDetails[] } = {};
-              filteredItems.forEach((details) => {
+              sortedFilteredItems.forEach((details) => {
                 const showName = getShowName(details.item.title);
                 if (!groupedShows[showName]) {
                   groupedShows[showName] = [];
@@ -522,7 +721,35 @@ export const Library: React.FC = () => {
                 groupedShows[showName].push(details);
               });
 
-              const showNames = Object.keys(groupedShows);
+              const showNames = Object.keys(groupedShows).sort((a, b) => {
+                const groupA = groupedShows[a];
+                const groupB = groupedShows[b];
+                
+                if (sortBy === "alphabetical") {
+                  return a.localeCompare(b);
+                }
+                if (sortBy === "quality_score") {
+                  const getAvgQ = (g: any[]) => g.reduce((sum, item) => sum + (item.files?.[0]?.quality_score ?? 0), 0) / g.length;
+                  return getAvgQ(groupB) - getAvgQ(groupA);
+                }
+                if (sortBy === "imdb_score") {
+                  const getAvgIMDb = (g: any[]) => g.reduce((sum, item) => sum + parseFloat(item.item.imdb_score || "0"), 0) / g.length;
+                  return getAvgIMDb(groupB) - getAvgIMDb(groupA);
+                }
+                if (sortBy === "rotten_tomatoes") {
+                  const getAvgRT = (g: any[]) => g.reduce((sum, item) => sum + parseInt(item.item.rt_score?.replace("%", "") || "0"), 0) / g.length;
+                  return getAvgRT(groupB) - getAvgRT(groupA);
+                }
+                if (sortBy === "duration") {
+                  const getAvgDur = (g: any[]) => g.reduce((sum, item) => sum + (item.item.runtime ?? 0), 0) / g.length;
+                  return getAvgDur(groupB) - getAvgDur(groupA);
+                }
+                if (sortBy === "date_added") {
+                  const getNewestDate = (g: any[]) => g.map(item => item.item.created_at || "").sort().pop() || "";
+                  return getNewestDate(groupB).localeCompare(getNewestDate(groupA));
+                }
+                return 0;
+              });
               return (
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
                   {showNames.map((showName) => {
@@ -554,6 +781,40 @@ export const Library: React.FC = () => {
                           <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
                             TV SHOW
                           </div>
+
+                          {/* Favorites Star Toggle Overlay (Top Right) */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const isFav = group.some(details => details.tags.includes("Favorites"));
+                              try {
+                                const { invoke } = await import("@tauri-apps/api/core");
+                                for (const details of group) {
+                                  const alreadyFav = details.tags.includes("Favorites");
+                                  let newTags;
+                                  if (isFav && alreadyFav) {
+                                    newTags = details.tags.filter(t => t !== "Favorites");
+                                  } else if (!isFav && !alreadyFav) {
+                                    newTags = [...details.tags, "Favorites"];
+                                  } else {
+                                    continue;
+                                  }
+                                  const updatedDetails = { ...details, tags: newTags };
+                                  await invoke("save_media", { details: updatedDetails });
+                                }
+                                await fetchItems(true);
+                              } catch (err) {
+                                console.error("Failed to toggle favorite for show:", err);
+                              }
+                            }}
+                            className="absolute top-2 right-2 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                            title={group.some(details => details.tags.includes("Favorites")) ? "Remove Show from Favorites" : "Mark Show as Favorite"}
+                          >
+                            <Star 
+                              size={15} 
+                              className={group.some(details => details.tags.includes("Favorites")) ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
+                            />
+                          </button>
                         </div>
                         <div className="p-3 space-y-1">
                           <div className="text-xs font-bold text-gray-200 truncate">{showName}</div>
@@ -574,7 +835,7 @@ export const Library: React.FC = () => {
               const renderList: (MediaItemDetails | { isShowFolder: true, showName: string, episodes: MediaItemDetails[] })[] = [];
               const groupedEpisodes: { [showName: string]: MediaItemDetails[] } = {};
 
-              filteredItems.forEach((details) => {
+              sortedFilteredItems.forEach((details) => {
                 if (details.item.media_type === "Episode") {
                   const showName = getShowName(details.item.title);
                   if (!groupedEpisodes[showName]) {
@@ -597,9 +858,80 @@ export const Library: React.FC = () => {
                 });
               }
 
+              // Sort the final mixed renderList using the chosen sortBy
+              const sortedRenderList = [...renderList].sort((a, b) => {
+                const getQuality = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    const scores = x.episodes.map((e: any) => e.files?.[0]?.quality_score).filter((s: any) => s !== undefined && s !== null);
+                    return scores.length === 0 ? 0 : scores.reduce((sum: number, s: number) => sum + s, 0) / scores.length;
+                  }
+                  return x.files?.[0]?.quality_score ?? 0;
+                };
+
+                const getRT = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    const scores = x.episodes.map((e: any) => parseInt(e.item.rt_score?.replace("%", "") || "0")).filter((s: number) => s > 0);
+                    return scores.length === 0 ? 0 : scores.reduce((sum: number, s: number) => sum + s, 0) / scores.length;
+                  }
+                  return parseInt(x.item.rt_score?.replace("%", "") || "0");
+                };
+
+                const getIMDb = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    const scores = x.episodes.map((e: any) => parseFloat(e.item.imdb_score || "0")).filter((s: number) => s > 0);
+                    return scores.length === 0 ? 0 : scores.reduce((sum: number, s: number) => sum + s, 0) / scores.length;
+                  }
+                  return parseFloat(x.item.imdb_score || "0");
+                };
+
+                const getDur = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    const runtimes = x.episodes.map((e: any) => e.item.runtime).filter((r: number) => r > 0);
+                    return runtimes.length === 0 ? 0 : runtimes.reduce((sum: number, s: number) => sum + s, 0) / runtimes.length;
+                  }
+                  return x.item.runtime ?? 0;
+                };
+
+                const getDate = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    const dates = x.episodes.map((e: any) => e.item.created_at || "");
+                    dates.sort();
+                    return dates[dates.length - 1] || "";
+                  }
+                  return x.item.created_at || "";
+                };
+
+                const getTitleStr = (x: any) => {
+                  if ('isShowFolder' in x) {
+                    return x.showName;
+                  }
+                  return x.item.title;
+                };
+
+                if (sortBy === "alphabetical") {
+                  return getTitleStr(a).localeCompare(getTitleStr(b));
+                }
+                if (sortBy === "quality_score") {
+                  return getQuality(b) - getQuality(a);
+                }
+                if (sortBy === "imdb_score") {
+                  return getIMDb(b) - getIMDb(a);
+                }
+                if (sortBy === "rotten_tomatoes") {
+                  return getRT(b) - getRT(a);
+                }
+                if (sortBy === "duration") {
+                  return getDur(b) - getDur(a);
+                }
+                if (sortBy === "date_added") {
+                  return getDate(b).localeCompare(getDate(a));
+                }
+                return 0;
+              });
+
               return (
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
-                  {renderList.map((entry) => {
+                  {sortedRenderList.map((entry) => {
                     if ("isShowFolder" in entry) {
                       // Render TV Show Folder Card in "All" view
                       const group = entry.episodes;
@@ -630,6 +962,40 @@ export const Library: React.FC = () => {
                             <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
                               TV SHOW
                             </div>
+
+                            {/* Favorites Star Toggle Overlay (Top Right) */}
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                const isFav = group.some(details => details.tags.includes("Favorites"));
+                                try {
+                                  const { invoke } = await import("@tauri-apps/api/core");
+                                  for (const details of group) {
+                                    const alreadyFav = details.tags.includes("Favorites");
+                                    let newTags;
+                                    if (isFav && alreadyFav) {
+                                      newTags = details.tags.filter(t => t !== "Favorites");
+                                    } else if (!isFav && !alreadyFav) {
+                                      newTags = [...details.tags, "Favorites"];
+                                    } else {
+                                      continue;
+                                    }
+                                    const updatedDetails = { ...details, tags: newTags };
+                                    await invoke("save_media", { details: updatedDetails });
+                                  }
+                                  await fetchItems(true);
+                                } catch (err) {
+                                  console.error("Failed to toggle favorite for show:", err);
+                                }
+                              }}
+                              className="absolute top-2 right-2 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                              title={group.some(details => details.tags.includes("Favorites")) ? "Remove Show from Favorites" : "Mark Show as Favorite"}
+                            >
+                              <Star 
+                                size={15} 
+                                className={group.some(details => details.tags.includes("Favorites")) ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
+                              />
+                            </button>
                           </div>
                           <div className="p-3 space-y-1">
                             <div className="text-xs font-bold text-gray-200 truncate">{entry.showName}</div>
@@ -666,15 +1032,59 @@ export const Library: React.FC = () => {
                               <span className="text-[10px] text-gray-500">NO ART</span>
                             </div>
                           )}
-                          <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start">
-                            <div className="text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-accent tracking-wider border border-accent/20">
-                              {details.item.media_type.toUpperCase()}
-                            </div>
+                          
+                          {/* Favorites Star Toggle Overlay (Top Right) */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const isFav = details.tags.includes("Favorites");
+                              let newTags;
+                              if (isFav) {
+                                newTags = details.tags.filter(t => t !== "Favorites");
+                              } else {
+                                newTags = [...details.tags, "Favorites"];
+                              }
+                              
+                              try {
+                                const updatedDetails = {
+                                  ...details,
+                                  tags: newTags,
+                                };
+                                const { invoke } = await import("@tauri-apps/api/core");
+                                await invoke("save_media", { details: updatedDetails });
+                                await fetchItems(true);
+                              } catch (err) {
+                                console.error("Failed to toggle favorite:", err);
+                              }
+                            }}
+                            className="absolute top-2 right-2 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                            title={details.tags.includes("Favorites") ? "Remove from Favorites" : "Mark as Favorite"}
+                          >
+                            <Star 
+                              size={15} 
+                              className={details.tags.includes("Favorites") ? "text-yellow-400 fill-yellow-400 hover:text-yellow-500" : "text-gray-400 hover:text-yellow-400"}
+                            />
+                          </button>
+
+                          {/* Overlaid Tag Badges (Top Left) */}
+                          <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
+                            {details.tags && details.tags.map((tag) => {
+                              if (tag === "Favorites") return null;
+                              let tagStyle = "bg-accent/90 text-white border border-accent/20";
+                              if (tag === "Animation") tagStyle = "bg-violet-600/90 text-white border border-violet-400/20";
+                              else if (tag === "Shorts") tagStyle = "bg-teal-600/90 text-white border border-teal-400/20";
+                              else if (tag === "Documentary") tagStyle = "bg-amber-600/90 text-white border border-amber-400/20";
+                              return (
+                                <div key={tag} className={`text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase ${tagStyle}`}>
+                                  {tag}
+                                </div>
+                              );
+                            })}
                             {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                              <div className={`text-[9px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
+                              <div className={`text-[8px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
                                 details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
                               }`}>
-                                <Crown size={9} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
+                                <Crown size={8} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
                                 <span>{Math.round(details.files[0].quality_score)}</span>
                               </div>
                             )}
@@ -683,8 +1093,20 @@ export const Library: React.FC = () => {
                         <div className="p-3 space-y-1">
                           <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
                           <div className="flex justify-between items-center text-[10px] text-gray-500">
-                            <span>{details.item.year || "Unknown"}</span>
-                            <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
+                            <span className="flex items-center space-x-1.5 min-w-0">
+                              <span className="shrink-0">{details.item.year || "Unknown"}</span>
+                              {details.item.imdb_score && (
+                                <span className="bg-yellow-500/20 text-yellow-400 font-extrabold px-1 rounded text-[7.5px] border border-yellow-500/30 font-sans tracking-tight shrink-0">
+                                  IMDb {details.item.imdb_score}
+                                </span>
+                              )}
+                              {details.item.rt_score && (
+                                <span className="bg-red-500/20 text-red-400 font-extrabold px-1 rounded text-[7.5px] border border-red-500/30 font-sans tracking-tight shrink-0">
+                                  RT {details.item.rt_score}
+                                </span>
+                              )}
+                            </span>
+                            <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
                           </div>
                         </div>
                       </div>
@@ -716,10 +1138,52 @@ export const Library: React.FC = () => {
                 </button>
               </div>
 
+              {/* Poster Preview & Edit Option */}
+              <div className="relative group rounded-lg overflow-hidden border border-gray-800 bg-gray-950 aspect-[2/3] max-w-[140px] mx-auto flex items-center justify-center shadow-lg">
+                {selectedItem.item.poster_path ? (
+                  <img
+                    src={getPosterUrl(selectedItem.item.poster_path)}
+                    alt="Poster Preview"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-gray-700 space-y-1 p-4 text-center">
+                    <Film size={24} />
+                    <span className="text-[9px] text-gray-500">NO POSTER</span>
+                  </div>
+                )}
+                <button
+                  onClick={async () => {
+                    try {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      const customPosterPath = await invoke<string | null>("select_custom_poster");
+                      if (customPosterPath) {
+                        setEditPoster(customPosterPath);
+                        const updatedDetails = {
+                          ...selectedItem,
+                          item: {
+                            ...selectedItem.item,
+                            poster_path: customPosterPath,
+                          }
+                        };
+                        setSelectedItem(updatedDetails);
+                        await invoke("save_media", { details: updatedDetails });
+                        await fetchItems(true);
+                      }
+                    } catch (err) {
+                      alert(`Failed to select custom poster: ${err}`);
+                    }
+                  }}
+                  className="absolute inset-0 bg-black/75 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center text-white space-y-1 cursor-pointer focus:outline-none"
+                  title="Change Poster Image"
+                >
+                  <Upload size={18} className="text-accent" />
+                  <span className="text-[9px] font-bold tracking-widest">CHANGE ART</span>
+                </button>
+              </div>
+
               {/* Editable Fields */}
               <div className="space-y-4 text-xs">
-
-
                 <div className="space-y-1.5">
                   <label className="text-[10px] text-gray-500 tracking-wider">ORIGINAL TITLE</label>
                   <input
@@ -731,6 +1195,16 @@ export const Library: React.FC = () => {
                 </div>
 
                 <div className="space-y-1.5">
+                  <label className="text-[10px] text-gray-500 tracking-wider">POSTER IMAGE (URL OR PATH)</label>
+                  <input
+                    type="text"
+                    value={editPoster}
+                    onChange={(e) => setEditPoster(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
                   <label className="text-[10px] text-gray-500 tracking-wider">YEAR</label>
                   <input
                     type="number"
@@ -738,6 +1212,29 @@ export const Library: React.FC = () => {
                     onChange={(e) => setEditYear(parseInt(e.target.value))}
                     className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
                   />
+                </div>
+
+                <div className="flex space-x-3">
+                  <div className="flex-1 space-y-1.5">
+                    <label className="text-[10px] text-gray-500 tracking-wider">IMDB SCORE</label>
+                    <input
+                      type="text"
+                      value={editImdbScore}
+                      placeholder="e.g. 8.3"
+                      onChange={(e) => setEditImdbScore(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200 font-sans"
+                    />
+                  </div>
+                  <div className="flex-1 space-y-1.5">
+                    <label className="text-[10px] text-gray-500 tracking-wider">ROTTEN TOMATOES</label>
+                    <input
+                      type="text"
+                      value={editRtScore}
+                      placeholder="e.g. 94%"
+                      onChange={(e) => setEditRtScore(e.target.value)}
+                      className="w-full bg-gray-900 border border-gray-800 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-gray-200"
+                    />
+                  </div>
                 </div>
 
                 <div className="space-y-1.5">
@@ -873,6 +1370,52 @@ export const Library: React.FC = () => {
                       </button>
                     </div>
                   </div>
+
+                  {/* OpenSubtitles integration */}
+                  <div className="space-y-1.5 pt-2 border-t border-gray-900 mt-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[9px] text-gray-500 font-bold uppercase tracking-wider">Search OpenSubtitles</span>
+                      <button
+                        onClick={handleSearchOpenSubtitles}
+                        disabled={isSearchingOs}
+                        className="bg-accent/15 border border-accent/35 text-accent hover:bg-accent hover:text-background font-extrabold text-[8.5px] px-2 py-0.5 rounded transition-all focus:outline-none disabled:opacity-50 flex items-center space-x-1"
+                      >
+                        <RefreshCw size={8} className={isSearchingOs ? "animate-spin" : ""} />
+                        <span>{isSearchingOs ? "SEARCHING..." : "SEARCH ONLINE"}</span>
+                      </button>
+                    </div>
+
+                    {osResults.length > 0 && (
+                      <div className="bg-gray-950 rounded border border-gray-900 p-2 max-h-36 overflow-y-auto space-y-1.5 scrollbar-thin">
+                        {osResults.map((result) => {
+                          const isDownloading = downloadingOsId === result.file_id;
+                          return (
+                            <div key={result.file_id} className="flex justify-between items-center text-[8.5px] border-b border-gray-900 pb-1.5 last:border-b-0 last:pb-0">
+                              <div className="flex-1 min-w-0 pr-2">
+                                <div className="text-gray-300 truncate font-mono" title={result.release}>
+                                  {result.release}
+                                </div>
+                                <div className="text-gray-500 font-sans flex items-center space-x-2">
+                                  <span className="bg-accent/10 text-accent font-bold px-1 rounded text-[7.5px] uppercase">
+                                    {result.language}
+                                  </span>
+                                  <span>{result.download_count} DLs</span>
+                                  {result.votes && <span>★ {result.votes}</span>}
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleDownloadOpenSubtitles(result.file_id, result.language)}
+                                disabled={downloadingOsId !== null}
+                                className="bg-emerald-500/10 border border-emerald-500/35 hover:bg-emerald-500 hover:text-background text-emerald-500 font-extrabold px-2 py-0.5 rounded transition-all focus:outline-none shrink-0"
+                              >
+                                {isDownloading ? "DOWNLOADING..." : "DOWNLOAD"}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* File Telemetry Details */}
@@ -934,6 +1477,18 @@ export const Library: React.FC = () => {
                         <span className="text-gray-500">AUDIO LANGUAGE:</span>
                         <span className="text-gray-300">{(selectedItem.files[0].audio_language || "N/A").toUpperCase()}</span>
                       </div>
+                      <div className="flex flex-col border-t border-gray-900 pt-1.5 mt-1 space-y-1">
+                        <span className="text-gray-500 text-[9px] font-bold">ALL AUDIO TRACKS:</span>
+                        <span className="text-gray-300 text-[9px] leading-tight whitespace-normal break-words">
+                          {selectedItem.files[0].audio_tracks || "N/A"}
+                        </span>
+                      </div>
+                      <div className="flex flex-col border-t border-gray-900 pt-1.5 mt-1 space-y-1">
+                        <span className="text-gray-500 text-[9px] font-bold">EMBEDDED SUBTITLES:</span>
+                        <span className="text-gray-300 text-[9px] leading-tight whitespace-normal break-words">
+                          {selectedItem.files[0].embedded_subtitles || "None"}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -941,12 +1496,23 @@ export const Library: React.FC = () => {
             </div>
 
             <div className="pt-6 border-t border-gray-800 space-y-3">
+              <div className="space-y-1">
+                <label className="text-[9px] text-gray-500 tracking-wider block">MANUAL SEARCH OVERRIDE (FOR ONLINE REFRESH)</label>
+                <input
+                  type="text"
+                  placeholder="Enter custom title to query online..."
+                  value={manualSearchQuery}
+                  onChange={(e) => setManualSearchQuery(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-850 rounded px-2.5 py-1.5 focus:outline-none focus:border-accent text-xs text-gray-200 font-sans"
+                />
+              </div>
+
               <button
                 onClick={async () => {
                   setIsRefreshing(true);
                   try {
                     const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("refresh_item_metadata", { itemId: selectedItem.item.id });
+                    await invoke("refresh_item_metadata", { itemId: selectedItem.item.id, searchOverride: manualSearchQuery || null });
                     alert("Metadata successfully refreshed from online API!");
                     await fetchItems();
                     const updated = useLibraryStore.getState().items.find(i => i.item.id === selectedItem.item.id);

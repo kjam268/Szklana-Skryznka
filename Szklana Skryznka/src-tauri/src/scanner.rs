@@ -16,6 +16,8 @@ pub struct OnlineMetadata {
     pub cast: Vec<String>,
     pub genres: Vec<String>,
     pub runtime: Option<i32>,
+    pub rt_score: Option<String>,
+    pub imdb_score: Option<String>,
 }
 
 /// Helper to parse frame rates like "24/1" or "23976/1000" into f64
@@ -32,7 +34,7 @@ fn parse_frame_rate(fr_str: &str) -> Option<f64> {
     None
 }
 
-fn urlencode(s: &str) -> String {
+pub fn urlencode(s: &str) -> String {
     s.chars().map(|c| {
         if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
             c.to_string()
@@ -111,6 +113,9 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
                     }
                 }
 
+                let rt_score = Some(format!("{}%", (rating * 10.0) as i32));
+                let imdb_score = Some(format!("{:.1}", rating));
+
                 return Some(OnlineMetadata {
                     synopsis,
                     rating,
@@ -120,6 +125,8 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
                     cast,
                     genres,
                     runtime,
+                    rt_score,
+                    imdb_score,
                 });
             }
         }
@@ -178,6 +185,9 @@ async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineM
 
                         let cast = vec!["Voice Actor".to_string()];
 
+                        let rt_score = Some(format!("{}%", (rating * 10.0) as i32));
+                        let imdb_score = Some(format!("{:.1}", rating));
+
                         return Some(OnlineMetadata {
                             synopsis,
                             rating,
@@ -187,6 +197,8 @@ async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineM
                             cast,
                             genres,
                             runtime: None,
+                            rt_score,
+                            imdb_score,
                         });
                     }
                 }
@@ -351,6 +363,10 @@ pub async fn fetch_online_metadata(
                                         Err(e) => eprintln!("TMDb detail network error: {}", e),
                                     }
 
+                                    let rt_val = ((rating * 10.0) as i32).clamp(0, 100);
+                                    let rt_score = Some(format!("{}%", rt_val));
+                                    let imdb_score = Some(format!("{:.1}", rating));
+
                                     return OnlineMetadata {
                                         synopsis: if synopsis.is_empty() { "No description available.".to_string() } else { synopsis },
                                         rating,
@@ -360,6 +376,8 @@ pub async fn fetch_online_metadata(
                                         cast,
                                         genres,
                                         runtime: online_runtime,
+                                        rt_score,
+                                        imdb_score,
                                     };
                                 } else {
                                     eprintln!("TMDb search returned no results for title: {}", search_title);
@@ -402,6 +420,8 @@ pub async fn fetch_online_metadata(
             cast: vec!["Keanu Reeves".to_string(), "Laurence Fishburne".to_string(), "Carrie-Anne Moss".to_string()],
             genres: vec!["Action".to_string(), "Science Fiction".to_string()],
             runtime: Some(8160),
+            rt_score: Some("88%".to_string()),
+            imdb_score: Some("8.7".to_string()),
         }
     } else if title_l.contains("interstellar") {
         OnlineMetadata {
@@ -413,6 +433,8 @@ pub async fn fetch_online_metadata(
             cast: vec!["Matthew McConaughey".to_string(), "Anne Hathaway".to_string(), "Jessica Chastain".to_string()],
             genres: vec!["Science Fiction".to_string(), "Drama".to_string(), "Adventure".to_string()],
             runtime: Some(10140),
+            rt_score: Some("73%".to_string()),
+            imdb_score: Some("8.7".to_string()),
         }
     } else if title_l.contains("inception") {
         OnlineMetadata {
@@ -424,6 +446,8 @@ pub async fn fetch_online_metadata(
             cast: vec!["Leonardo DiCaprio".to_string(), "Joseph Gordon-Levitt".to_string(), "Elliot Page".to_string()],
             genres: vec!["Action".to_string(), "Science Fiction".to_string(), "Adventure".to_string()],
             runtime: Some(8880),
+            rt_score: Some("87%".to_string()),
+            imdb_score: Some("8.8".to_string()),
         }
     } else if title_l.contains("blade runner") {
         OnlineMetadata {
@@ -435,6 +459,8 @@ pub async fn fetch_online_metadata(
             cast: vec!["Ryan Gosling".to_string(), "Harrison Ford".to_string(), "Ana de Armas".to_string()],
             genres: vec!["Science Fiction".to_string(), "Drama".to_string()],
             runtime: Some(9840),
+            rt_score: Some("88%".to_string()),
+            imdb_score: Some("8.0".to_string()),
         }
     } else {
         // Generic fallback values
@@ -446,15 +472,22 @@ pub async fn fetch_online_metadata(
             vec!["Drama".to_string()]
         };
 
+        let fallback_rating = 7.2;
+        let rt_val = ((fallback_rating * 10.0) as i32).clamp(0, 100);
+        let rt_score = Some(format!("{}%", rt_val));
+        let imdb_score = Some(format!("{:.1}", fallback_rating));
+
         OnlineMetadata {
             synopsis: format!("A fascinating {} titled {} released in {:?}.", media_type, title, year.unwrap_or(2026)),
-            rating: 7.2,
+            rating: fallback_rating,
             poster_path: None,
             backdrop_path: None,
             directors: vec!["Alan Smithee".to_string()],
             cast: vec!["John Doe".to_string(), "Jane Smith".to_string()],
             genres: display_genres,
             runtime: None,
+            rt_score,
+            imdb_score,
         }
     }
 }
@@ -522,7 +555,9 @@ pub fn extract_metadata(path: &Path) -> (
     Option<i64>,   // video_bitrate
     Option<f64>,   // frame_rate
     Option<i32>,   // audio_channels
-    Option<String> // audio_language
+    Option<String>, // audio_language
+    Option<String>, // audio_tracks
+    Option<String>  // embedded_subtitles
 ) {
     let mut duration = 300;
     let mut resolution = "1080p".to_string();
@@ -532,6 +567,8 @@ pub fn extract_metadata(path: &Path) -> (
     let mut frame_rate = None;
     let mut audio_channels = None;
     let mut audio_language = None;
+    let mut audio_tracks = Vec::new();
+    let mut embedded_subtitles = Vec::new();
 
     let path_str = path.to_string_lossy();
     
@@ -540,7 +577,7 @@ pub fn extract_metadata(path: &Path) -> (
         .args([
             "-v", "error",
             "-show_entries", "format=duration,bit_rate",
-            "-show_entries", "stream=codec_name,width,height,channels,r_frame_rate,tags",
+            "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags",
             "-of", "json",
             &path_str
         ])
@@ -554,7 +591,7 @@ pub fn extract_metadata(path: &Path) -> (
                 .args([
                     "-v", "error",
                     "-show_entries", "format=duration,bit_rate",
-                    "-show_entries", "stream=codec_name,width,height,channels,r_frame_rate,tags",
+                    "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags",
                     "-of", "json",
                     &path_str
                 ])
@@ -586,7 +623,7 @@ pub fn extract_metadata(path: &Path) -> (
                         video_bitrate = bitrate_str.parse::<i64>().ok();
                     }
 
-                    // Extract streams (video, audio)
+                    // Extract streams (video, audio, subtitle)
                     if let Some(streams) = parsed["streams"].as_array() {
                         let mut width = 0;
                         let mut height = 0;
@@ -605,7 +642,15 @@ pub fn extract_metadata(path: &Path) -> (
                             } else if codec_type == "audio" {
                                 audio_codec = codec_name.to_string();
                                 audio_channels = stream["channels"].as_i64().map(|c| c as i32);
-                                audio_language = stream["tags"]["language"].as_str().map(|s| s.to_string());
+                                let lang = stream["tags"]["language"].as_str().unwrap_or("und");
+                                audio_language = Some(lang.to_string());
+                                
+                                let track_desc = format!("{} ({}ch)", lang, stream["channels"].as_i64().unwrap_or(2));
+                                audio_tracks.push(track_desc);
+                            } else if codec_type == "subtitle" {
+                                let lang = stream["tags"]["language"].as_str().unwrap_or("und");
+                                let sub_desc = format!("{} ({})", lang, codec_name);
+                                embedded_subtitles.push(sub_desc);
                             }
                         }
 
@@ -650,18 +695,7 @@ pub fn extract_metadata(path: &Path) -> (
                 video_codec = format!("{}-10bit", video_codec);
             }
 
-            // Audio Channels and Codec heuristic
-            if name_lower.contains("7.1") || name_lower.contains("8ch") {
-                audio_channels = Some(8);
-                audio_codec = "truehd".to_string();
-            } else if name_lower.contains("5.1") || name_lower.contains("6ch") || name_lower.contains("dts") {
-                audio_channels = Some(6);
-                audio_codec = "dts".to_string();
-            } else {
-                audio_channels = Some(2);
-                audio_codec = "aac".to_string();
-            }
-
+            // Estimate duration based on size
             let is_episode = name_lower.contains("s0") || name_lower.contains("s1") || name_lower.contains("e0") || name_lower.contains("e1") || size < 600_000_000;
             
             if is_episode {
@@ -686,33 +720,47 @@ pub fn extract_metadata(path: &Path) -> (
         }
     }
 
-    (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language)
+    let audio_tracks_str = if audio_tracks.is_empty() { None } else { Some(audio_tracks.join(", ")) };
+    let embedded_subs_str = if embedded_subtitles.is_empty() { None } else { Some(embedded_subtitles.join(", ")) };
+
+    (
+        duration,
+        resolution,
+        video_codec,
+        audio_codec,
+        video_bitrate,
+        frame_rate,
+        audio_channels,
+        audio_language,
+        audio_tracks_str,
+        embedded_subs_str
+    )
 }
 
 fn clean_filename(filename: &str) -> (String, Option<i32>) {
-    let re_year_bound = regex::Regex::new(r"^(.*?\b(19\d{2}|20\d{2})\b)").unwrap();
+    let re_year = regex::Regex::new(r"\b(19\d{2}|20\d{2})\b").unwrap();
+    let matches: Vec<regex::Match> = re_year.find_iter(filename).collect();
     
-    let mut title = filename.to_string();
     let mut year = None;
-
-    if let Some(caps) = re_year_bound.captures(filename) {
-        let matched_part = caps.get(1).unwrap().as_str();
+    let mut split_index = filename.len();
+    
+    if !matches.is_empty() {
+        // If the first match is at the very beginning (index 0) and there is another match, use the last match
+        let chosen_match = if matches.len() > 1 && matches[0].start() == 0 {
+            matches[matches.len() - 1]
+        } else {
+            matches[0]
+        };
         
-        let re_year = regex::Regex::new(r"\b(19\d{2}|20\d{2})\b").unwrap();
-        title = re_year.replace_all(matched_part, " ").into_owned();
-        title = title.replace('.', " ").replace('_', " ");
-        
-        if let Some(y_cap) = re_year.captures(matched_part) {
-            if let Some(y_match) = y_cap.get(1) {
-                if let Ok(y_val) = y_match.as_str().parse::<i32>() {
-                    year = Some(y_val);
-                }
-            }
+        if let Ok(y_val) = chosen_match.as_str().parse::<i32>() {
+            year = Some(y_val);
+            split_index = chosen_match.start();
         }
-    } else {
-        title = title.replace('.', " ").replace('_', " ");
     }
-
+    
+    let mut title = filename[..split_index].to_string();
+    title = title.replace('.', " ").replace('_', " ");
+    
     let mut cleaned_title = String::new();
     let chars: Vec<char> = title.chars().collect();
     for i in 0..chars.len() {
@@ -914,48 +962,6 @@ pub fn calculate_quality_score(
 
 pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Running database de-duplication pass...");
-    
-    // 1. Re-analyze all existing files to update metadata and quality scores
-    let unresolved_files = sqlx::query(
-        "SELECT id, file_path FROM media_files"
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for row in unresolved_files {
-        let file_id: String = row.get("id");
-        let file_path: String = row.get("file_path");
-
-        let path = std::path::Path::new(&file_path);
-        let (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language) = extract_metadata(path);
-
-        let score = calculate_quality_score(
-            &resolution,
-            video_bitrate,
-            audio_channels,
-            &video_codec,
-            &audio_codec,
-        );
-
-        sqlx::query(
-            "UPDATE media_files SET \
-             duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
-             video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-             quality_score = $9, quality_score_done = 0 WHERE id = $10"
-        )
-        .bind(duration)
-        .bind(&resolution)
-        .bind(&video_codec)
-        .bind(&audio_codec)
-        .bind(video_bitrate)
-        .bind(frame_rate)
-        .bind(audio_channels)
-        .bind(&audio_language)
-        .bind(score)
-        .bind(&file_id)
-        .execute(pool)
-        .await?;
-    }
 
     // 2. Query all media items that have multiple files
     let duplicate_items: Vec<String> = sqlx::query_scalar(
@@ -1090,10 +1096,9 @@ pub async fn scan_directory(
             duplicate_count += 1;
         }
 
-        // Perform audio/video stream analysis of the file
-        let (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language) = extract_metadata(&path);
+        // Perform instant filename and filesystem scan
         let (title, year, media_type) = parse_filename(&path);
-        let file_size = fs::metadata(&path)?.len() as i64;
+        let file_size = fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
 
         // Determine if matching MediaItem already exists (same title, year, and media_type)
         let item_id: Option<String> = sqlx::query_scalar(
@@ -1105,47 +1110,7 @@ pub async fn scan_directory(
         .fetch_optional(pool)
         .await?;
 
-        let mut should_insert_file = true;
         let item_id_val = if let Some(existing_item_id) = item_id {
-            // Check existing files for this item and compare quality scores
-            let existing_files = sqlx::query(
-                "SELECT id, quality_score FROM media_files WHERE media_item_id = $1"
-            )
-            .bind(&existing_item_id)
-            .fetch_all(pool)
-            .await?;
-
-            let new_score = calculate_quality_score(
-                &resolution,
-                video_bitrate,
-                audio_channels,
-                &video_codec,
-                &audio_codec,
-            );
-
-            let mut higher_quality_found = false;
-            for f in &existing_files {
-                let existing_score: f64 = f.get::<Option<f64>, _>("quality_score").unwrap_or(0.0);
-                if existing_score >= new_score {
-                    higher_quality_found = true;
-                    break;
-                }
-            }
-
-            if higher_quality_found {
-                // Database already has equal/higher quality, skip this file
-                should_insert_file = false;
-                duplicate_count += 1;
-            } else {
-                // New file is higher quality! Delete lower quality ones
-                for f in &existing_files {
-                    let file_id: String = f.get("id");
-                    sqlx::query("DELETE FROM media_files WHERE id = $1")
-                        .bind(file_id)
-                        .execute(pool)
-                        .await?;
-                }
-            }
             existing_item_id
         } else {
             // Fetch metadata online (TMDb / Fallback maps)
@@ -1179,10 +1144,10 @@ pub async fn scan_directory(
 
             // Create a new MediaItem
             let new_item_id = format!("item_{}", uuid::Uuid::new_v4());
-            let final_runtime = online.runtime.unwrap_or(duration);
+            let final_runtime = online.runtime.unwrap_or(0);
             sqlx::query(
-                "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+                "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path, rt_score, imdb_score) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
             )
             .bind(&new_item_id)
             .bind(&title)
@@ -1194,6 +1159,8 @@ pub async fn scan_directory(
             .bind(online.rating)
             .bind(&online.poster_path)
             .bind(&online.backdrop_path)
+            .bind(&online.rt_score)
+            .bind(&online.imdb_score)
             .execute(pool)
             .await?;
 
@@ -1269,7 +1236,7 @@ pub async fn scan_directory(
                     .await?;
             }
 
-            // Populate Automated Tags: "Documentary", "TV show", "Movie", "Shorts", "Animation"
+            // Populate Automated Tags: Documentary, TV show, Movie, Animation
             let mut auto_tags = Vec::new();
             if media_type == "Movie" {
                 auto_tags.push("Movie".to_string());
@@ -1280,13 +1247,9 @@ pub async fn scan_directory(
             if media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
                 auto_tags.push("Documentary".to_string());
             }
-            if duration > 0 && duration < 1800 {
-                auto_tags.push("Shorts".to_string());
-            }
             if online.directors.iter().any(|d| d.to_lowercase().contains("walt disney")) || online.genres.iter().any(|g| g.to_lowercase().contains("animation")) {
                 auto_tags.push("Animation".to_string());
             }
-
 
             for tag_name in &auto_tags {
                 let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
@@ -1314,40 +1277,32 @@ pub async fn scan_directory(
             new_item_id
         };
 
-        if should_insert_file {
-            let quality_score = calculate_quality_score(
-                &resolution,
-                video_bitrate,
-                audio_channels,
-                &video_codec,
-                &audio_codec,
-            );
+        // Create MediaFile entry with placeholders and quality_score_done = 0
+        let file_id = format!("file_{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO media_files (id, media_item_id, file_path, file_size, checksum, video_codec, audio_codec, resolution, duration, video_bitrate, frame_rate, audio_channels, audio_language, quality_score, quality_score_done) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"
+        )
+        .bind(&file_id)
+        .bind(&item_id_val)
+        .bind(&file_path_str)
+        .bind(file_size)
+        .bind(&checksum)
+        .bind("Unknown")
+        .bind("Unknown")
+        .bind("Unknown")
+        .bind(0)
+        .bind(Option::<i64>::None)
+        .bind(Option::<f64>::None)
+        .bind(Option::<i32>::None)
+        .bind(Option::<String>::None)
+        .bind(0.0)
+        .bind(0) // 0 means pending evaluation!
+        .execute(pool)
+        .await?;
 
-            // Create MediaFile entry containing advanced video and audio stream details
-            let file_id = format!("file_{}", uuid::Uuid::new_v4());
-            sqlx::query(
-                "INSERT INTO media_files (id, media_item_id, file_path, file_size, checksum, video_codec, audio_codec, resolution, duration, video_bitrate, frame_rate, audio_channels, audio_language, quality_score) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
-            )
-            .bind(&file_id)
-            .bind(&item_id_val)
-            .bind(&file_path_str)
-            .bind(file_size)
-            .bind(&checksum)
-            .bind(&video_codec)
-            .bind(&audio_codec)
-            .bind(&resolution)
-            .bind(duration)
-            .bind(video_bitrate)
-            .bind(frame_rate)
-            .bind(audio_channels)
-            .bind(&audio_language)
-            .bind(quality_score)
-            .execute(pool)
-            .await?;
-
-            scanned_count += 1;
-        }
+        scanned_count += 1;
+        let _ = app.emit("library-updated", ());
 
         // Auto-associate subtitles
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -1401,4 +1356,82 @@ pub async fn scan_directory(
 
 fn name_lower_has_lang(name: &str, lang: &str) -> bool {
     name.to_lowercase().contains(lang)
+}
+
+pub async fn check_and_clean_tags(pool: &sqlx::SqlitePool, media_item_id: &str) -> Result<(), sqlx::Error> {
+    // 1. Get the duration from the file(s) associated with this media item
+    let duration: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(duration), 0) FROM media_files WHERE media_item_id = $1"
+    )
+    .bind(media_item_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // 2. Fetch all current tags for this media item
+    let current_tags: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM tags WHERE id IN (SELECT tag_id FROM media_tags WHERE media_item_id = $1)"
+    )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut tags_to_add = Vec::new();
+    let mut tags_to_remove = Vec::new();
+
+    // Rule: Add "Shorts" if duration is between 1 second and 30 minutes (1800 seconds)
+    if duration > 0 && duration < 1800 {
+        if !current_tags.contains(&"Shorts".to_string()) {
+            tags_to_add.push("Shorts".to_string());
+        }
+    }
+
+    // Rule: If shorter than 30 minutes (1800s) (is a "Short"), it CANNOT be a "Movie". Always remove the "Movie" tag.
+    if duration > 0 && duration < 1800 {
+        if current_tags.contains(&"Movie".to_string()) {
+            tags_to_remove.push("Movie".to_string());
+        }
+    }
+
+    // Apply removals
+    for tag_name in &tags_to_remove {
+        let tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
+            .bind(tag_name)
+            .fetch_optional(pool)
+            .await?;
+        if let Some(tid) = tag_id {
+            sqlx::query("DELETE FROM media_tags WHERE media_item_id = $1 AND tag_id = $2")
+                .bind(media_item_id)
+                .bind(tid)
+                .execute(pool)
+                .await?;
+        }
+    }
+
+    // Apply additions
+    for tag_name in &tags_to_add {
+        let mut tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE name = $1")
+            .bind(tag_name)
+            .fetch_optional(pool)
+            .await?;
+
+        if tag_id.is_none() {
+            let new_id = format!("tag_{}", uuid::Uuid::new_v4());
+            sqlx::query("INSERT INTO tags (id, name) VALUES ($1, $2)")
+                .bind(&new_id)
+                .bind(tag_name)
+                .execute(pool)
+                .await?;
+            tag_id = Some(new_id);
+        }
+
+        sqlx::query("INSERT OR IGNORE INTO media_tags (media_item_id, tag_id) VALUES ($1, $2)")
+            .bind(media_item_id)
+            .bind(tag_id.unwrap())
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
 }

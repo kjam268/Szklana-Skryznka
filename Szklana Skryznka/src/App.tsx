@@ -7,12 +7,9 @@ import { Grid } from "./pages/Grid";
 import { DatabaseViewer } from "./pages/Database";
 import { Health } from "./pages/Health";
 import { Suggestions } from "./pages/Suggestions";
-
 function App() {
   const [isBooted, setIsBooted] = useState(false);
   const [activeTab, setActiveTab] = useState("onair");
-
-
 
   // Show splash screen on boot sequence
   if (!isBooted) {

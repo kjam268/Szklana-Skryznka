@@ -16,6 +16,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [tempKey, setTempKey] = useState("");
   const [tempAnilistKey, setTempAnilistKey] = useState("");
+  const [tempOpensubtitlesKey, setTempOpensubtitlesKey] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [tmdbStatus, setTmdbStatus] = useState<"checking" | "connected" | "disconnected" | "none">("checking");
@@ -98,6 +99,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       setTempKey(existingKey || "");
       const existingAnilistKey = await invoke<string | null>("get_setting", { key: "anilist_api_key" });
       setTempAnilistKey(existingAnilistKey || "");
+      const existingOpensubtitlesKey = await invoke<string | null>("get_setting", { key: "opensubtitles_api_key" });
+      setTempOpensubtitlesKey(existingOpensubtitlesKey || "");
     } catch (e) {
       console.error("Failed to load settings:", e);
     }
@@ -110,8 +113,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     try {
       const key_trimmed = tempKey.trim();
       const anilist_trimmed = tempAnilistKey.trim();
+      const opensubtitles_trimmed = tempOpensubtitlesKey.trim();
       await invoke("set_setting", { key: "tmdb_api_key", value: key_trimmed });
       await invoke("set_setting", { key: "anilist_api_key", value: anilist_trimmed });
+      await invoke("set_setting", { key: "opensubtitles_api_key", value: opensubtitles_trimmed });
       setTmdbStatus("checking");
       
       if (key_trimmed === "") {
@@ -147,7 +152,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       <aside 
         onMouseEnter={() => setIsCollapsed(false)}
         onMouseLeave={() => setIsCollapsed(true)}
-        className={`absolute left-0 top-0 h-screen bg-panel border-r border-gray-800 flex flex-col justify-between transition-all duration-300 z-30 ${
+        className={`absolute left-0 top-0 h-screen bg-panel/90 backdrop-blur-lg border-r border-gray-800 flex flex-col justify-between transition-all duration-300 z-30 ${
           isCollapsed ? "w-16 shadow-none" : "w-64 shadow-[10px_0_30px_rgba(0,0,0,0.6)]"
         }`}
       >
@@ -365,7 +370,26 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                             value={tempAnilistKey}
                             onChange={(e) => setTempAnilistKey(e.target.value)}
                             disabled={isSaving}
-                            className="w-full bg-gray-950 border border-gray-850 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-accent text-accent font-bold font-mono placeholder-gray-700 disabled:opacity-50"
+                            className="w-full bg-gray-950 border border-gray-855 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-accent text-accent font-bold font-mono placeholder-gray-700 disabled:opacity-50"
+                          />
+                        </div>
+                      </div>
+
+                      {/* OpenSubtitles Section */}
+                      <div className="space-y-2">
+                        <span className="text-[10px] text-accent font-bold tracking-wider block">OpenSubtitles Subtitles Search</span>
+                        <p className="text-[9px] text-gray-400 leading-normal font-mono">
+                          Provide your OpenSubtitles.com API Key to dynamically fetch subtitle files directly inside your movie pages.
+                        </p>
+                        <div className="space-y-1.5">
+                          <label className="text-[8px] text-gray-500 tracking-widest uppercase font-bold">OPENSUBTITLES API KEY</label>
+                          <input
+                            type="password"
+                            placeholder="Enter OpenSubtitles API Key..."
+                            value={tempOpensubtitlesKey}
+                            onChange={(e) => setTempOpensubtitlesKey(e.target.value)}
+                            disabled={isSaving}
+                            className="w-full bg-gray-950 border border-gray-855 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-accent text-accent font-bold font-mono placeholder-gray-700 disabled:opacity-50"
                           />
                         </div>
                       </div>

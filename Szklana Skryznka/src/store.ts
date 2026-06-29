@@ -30,6 +30,10 @@ export interface MediaFile {
   duration: number;
   quality_score?: number;
   quality_score_done?: number;
+  video_bitrate?: number;
+  frame_rate?: number;
+  audio_channels?: number;
+  audio_language?: string;
 }
 
 export interface Subtitle {
@@ -152,13 +156,17 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
     set({ isScanning: true, scanProgress: 0, scanLogs: `Initializing scan for directory: ${path}...` });
     try {
       const { listen } = await import("@tauri-apps/api/event");
-      const unlisten = listen<number>("scan-progress", (event) => {
+      const unlistenProgress = listen<number>("scan-progress", (event) => {
         set({ scanProgress: event.payload });
+      });
+      const unlistenFile = listen<string>("scan-file", (event) => {
+        set({ scanLogs: `Importing: ${event.payload}` });
       });
 
       const logs = await invoke<string>("scan_library", { path });
       
-      unlisten.then((f) => f());
+      unlistenProgress.then((f) => f());
+      unlistenFile.then((f) => f());
       set({ isScanning: false, scanProgress: 100, scanLogs: logs });
       await get().fetchItems();
       return logs;
@@ -169,7 +177,7 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
   },
   saveMetadata: async (details: MediaItemDetails) => {
     await invoke("save_media", { details });
-    await get().fetchItems();
+    await get().fetchItems(true);
   },
   deleteItem: async (id: string) => {
     await invoke("delete_media", { id });
