@@ -75,7 +75,43 @@ export const Library: React.FC = () => {
 
   useEffect(() => {
     fetchItems();
+    
+    let unlistenFn: (() => void) | null = null;
+    const setupListener = async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen("library-updated", () => {
+          fetchItems(true);
+        });
+        unlistenFn = unlisten;
+      } catch (e) {
+        console.error("Failed to setup library-updated listener:", e);
+      }
+    };
+    setupListener();
+
+    return () => {
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
   }, [fetchItems]);
+
+  useEffect(() => {
+    if (selectedItem) {
+      const updated = items.find((item) => item.item.id === selectedItem.item.id);
+      if (updated) {
+        const currentScore = selectedItem.files[0]?.quality_score;
+        const currentDone = selectedItem.files[0]?.quality_score_done;
+        const newScore = updated.files[0]?.quality_score;
+        const newDone = updated.files[0]?.quality_score_done;
+        
+        if (currentScore !== newScore || currentDone !== newDone) {
+          setSelectedItem(updated);
+        }
+      }
+    }
+  }, [items, selectedItem]);
 
   const handleSelectCard = (details: MediaItemDetails) => {
     setSelectedItem(details);
@@ -109,7 +145,16 @@ export const Library: React.FC = () => {
         backdrop_path: editBackdrop,
       },
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
-      tags: editTags,
+      tags: (() => {
+        const dirs = editDirectors.split(",").map((d) => d.trim()).filter((d) => d !== "");
+        let t = [...editTags];
+        if (dirs.some(d => d.toLowerCase().includes("walt disney"))) {
+          if (!t.includes("Animation")) {
+            t.push("Animation");
+          }
+        }
+        return t;
+      })(),
       directors: editDirectors.split(",").map((d) => d.trim()).filter((d) => d !== ""),
       actors: editActors.split(",").map((a) => a.trim()).filter((a) => a !== ""),
     };
@@ -150,6 +195,14 @@ export const Library: React.FC = () => {
     }
   };
 
+  const handleStopScan = async () => {
+    try {
+      await invoke("stop_scan");
+    } catch (e) {
+      console.error("Failed to stop scan:", e);
+    }
+  };
+
   const getShowName = (title: string) => {
     const match = title.match(/^(.*?) - S\d{2}E\d{2}/i);
     if (match) {
@@ -171,11 +224,22 @@ export const Library: React.FC = () => {
     const titleMatch = details.item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                        (details.item.original_title && details.item.original_title.toLowerCase().includes(searchQuery.toLowerCase()));
     
-    const tagMatch = selectedTab === "All" || details.tags.includes(selectedTab);
+    let tagMatch = false;
+    if (selectedTab === "All") {
+      tagMatch = true;
+    } else if (selectedTab === "Not Found") {
+      // Videos for which neither AniList nor TMDb returned a match or positive result
+      const poster = details.item.poster_path;
+      const hasPoster = poster && (poster.startsWith("http://") || poster.startsWith("https://"));
+      tagMatch = !hasPoster;
+    } else {
+      tagMatch = details.tags.includes(selectedTab);
+    }
+    
     return titleMatch && tagMatch;
   });
 
-  const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Favorites", "Kids", "Classic"];
+  const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Animation", "Shorts", "Favorites", "Kids", "Classic", "Not Found"];
 
   const getPosterUrl = (path?: string) => {
     if (!path) return "";
@@ -235,24 +299,39 @@ export const Library: React.FC = () => {
                 className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent"
               />
             </div>
-            <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
-              {libraryTabs.map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => {
-                    setSelectedTab(tab);
-                    setSelectedShow(null);
-                    setSelectedSeason(null);
-                  }}
-                  className={`text-xs px-3 py-2 rounded-lg font-mono transition-colors whitespace-nowrap ${
-                    selectedTab === tab
-                      ? "bg-accent/15 text-accent border border-accent/30 font-bold"
-                      : "bg-panel border border-gray-800 text-gray-400 hover:text-gray-200"
-                  }`}
-                >
-                  {tab.toUpperCase()}
-                </button>
-              ))}
+             <div className="flex space-x-1.5 overflow-x-auto max-w-2xl scrollbar-none">
+              {libraryTabs.map((tab) => {
+                const isNotFound = tab === "Not Found";
+                let btnStyle = "";
+                
+                if (selectedTab === tab) {
+                  if (isNotFound) {
+                    btnStyle = "bg-amber-500/15 text-amber-500 border border-amber-500/30 font-bold shadow-[0_0_10px_rgba(245,158,11,0.15)]";
+                  } else {
+                    btnStyle = "bg-accent/15 text-accent border border-accent/30 font-bold";
+                  }
+                } else {
+                  if (isNotFound) {
+                    btnStyle = "bg-amber-950/5 border border-amber-950/20 text-amber-500/60 hover:text-amber-400 hover:bg-amber-950/15";
+                  } else {
+                    btnStyle = "bg-panel border border-gray-800 text-gray-400 hover:text-gray-200";
+                  }
+                }
+
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => {
+                      setSelectedTab(tab);
+                      setSelectedShow(null);
+                      setSelectedSeason(null);
+                    }}
+                    className={`text-xs px-3 py-2 rounded-lg font-mono transition-all whitespace-nowrap ${btnStyle}`}
+                  >
+                    {tab.toUpperCase()}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -260,9 +339,17 @@ export const Library: React.FC = () => {
         {/* SCAN STATUS LOGS OVERLAY */}
         {isScanning && (
           <div className="bg-cyan-950/20 border border-accent/20 rounded-lg p-3 text-xs text-accent mt-3 space-y-2">
-            <div className="flex justify-between font-bold">
-              <span>{scanLogs}</span>
-              <span>{scanProgress}%</span>
+            <div className="flex justify-between items-center font-bold">
+              <span className="truncate max-w-[70%]">{scanLogs}</span>
+              <div className="flex items-center space-x-3">
+                <span>{scanProgress}%</span>
+                <button
+                  onClick={handleStopScan}
+                  className="bg-rose-500/20 hover:bg-rose-500/35 text-rose-500 border border-rose-500/30 text-[10px] px-2 py-0.5 rounded font-mono transition-colors focus:outline-none"
+                >
+                  STOP SCAN
+                </button>
+              </div>
             </div>
             <div className="w-full bg-gray-900 rounded-full h-1.5 overflow-hidden border border-gray-800">
               <div className="bg-accent h-1.5 transition-all duration-300" style={{ width: `${scanProgress}%` }}></div>
@@ -343,8 +430,10 @@ export const Library: React.FC = () => {
                                   {details.item.media_type.toUpperCase()}
                                 </div>
                                 {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                                  <div className="text-[9px] bg-amber-500/90 text-background px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20">
-                                    <Crown size={9} className="fill-current text-background" />
+                                  <div className={`text-[9px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
+                                    details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
+                                  }`}>
+                                    <Crown size={9} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
                                     <span>{Math.round(details.files[0].quality_score)}</span>
                                   </div>
                                 )}
@@ -582,8 +671,10 @@ export const Library: React.FC = () => {
                               {details.item.media_type.toUpperCase()}
                             </div>
                             {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                              <div className="text-[9px] bg-amber-500/90 text-background px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20">
-                                <Crown size={9} className="fill-current text-background" />
+                              <div className={`text-[9px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
+                                details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
+                              }`}>
+                                <Crown size={9} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
                                 <span>{Math.round(details.files[0].quality_score)}</span>
                               </div>
                             )}

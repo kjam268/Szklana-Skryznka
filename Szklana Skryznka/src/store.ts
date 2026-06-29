@@ -29,6 +29,7 @@ export interface MediaFile {
   resolution?: string;
   duration: number;
   quality_score?: number;
+  quality_score_done?: number;
 }
 
 export interface Subtitle {
@@ -119,7 +120,7 @@ interface LibraryStore {
   scanLogs: string;
   searchQuery: string;
   selectedType: string;
-  fetchItems: () => Promise<void>;
+  fetchItems: (silent?: boolean) => Promise<void>;
   scanLibrary: (path: string) => Promise<string>;
   saveMetadata: (details: MediaItemDetails) => Promise<void>;
   deleteItem: (id: string) => Promise<void>;
@@ -135,8 +136,10 @@ export const useLibraryStore = create<LibraryStore>((set, get) => ({
   scanLogs: "",
   searchQuery: "",
   selectedType: "All",
-  fetchItems: async () => {
-    set({ isLoading: true });
+  fetchItems: async (silent = false) => {
+    if (!silent) {
+      set({ isLoading: true });
+    }
     try {
       const items = await invoke<MediaItemDetails[]>("get_media");
       set({ items, isLoading: false });

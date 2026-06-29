@@ -16,13 +16,30 @@ pub type DbState<'a> = State<'a, SqlitePool>;
 #[tauri::command]
 pub async fn scan_library(app: tauri::AppHandle, pool: DbState<'_>, path: String) -> Result<String, String> {
     info!("Tauri command scan_library invoked for path: {}", path);
-    match scan_directory(&app, &pool, &path).await {
+    let res = scan_directory(&app, &pool, &path).await;
+    
+    // Ensure scan_in_progress is set to false on completion or error
+    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_in_progress', 'false')")
+        .execute(&*pool)
+        .await;
+
+    match res {
         Ok((scanned, duplicates)) => Ok(format!(
             "Scan completed. Successfully cataloged {} files. Skipped {} duplicates.",
             scanned, duplicates
         )),
         Err(e) => Err(format!("Scan failed: {}", e)),
     }
+}
+
+#[tauri::command]
+pub async fn stop_scan(pool: DbState<'_>) -> Result<(), String> {
+    info!("stop_scan invoked by user.");
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_stop_requested', 'true')")
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -907,6 +924,13 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
         .await
         .map_err(|e| e.to_string())?;
     
+    let duration: i32 = sqlx::query_scalar("SELECT duration FROM media_files WHERE media_item_id = $1")
+        .bind(&item_id)
+        .fetch_optional(&*pool)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(0);
+
     let mut auto_tags = Vec::new();
     if item.media_type == "Movie" {
         auto_tags.push("Movie".to_string());
@@ -916,6 +940,12 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String) -> Result
     }
     if item.media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
         auto_tags.push("Documentary".to_string());
+    }
+    if duration > 0 && duration < 1800 {
+        auto_tags.push("Shorts".to_string());
+    }
+    if online.directors.iter().any(|d| d.to_lowercase().contains("walt disney")) || online.genres.iter().any(|g| g.to_lowercase().contains("animation")) {
+        auto_tags.push("Animation".to_string());
     }
 
 

@@ -941,7 +941,7 @@ pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::
             "UPDATE media_files SET \
              duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
              video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-             quality_score = $9 WHERE id = $10"
+             quality_score = $9, quality_score_done = 0 WHERE id = $10"
         )
         .bind(duration)
         .bind(&resolution)
@@ -1031,8 +1031,27 @@ pub async fn scan_directory(
     let mut scanned_count = 0;
     let mut duplicate_count = 0;
 
+    // Set settings
+    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_in_progress', 'true')")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_stop_requested', 'false')")
+        .execute(pool)
+        .await;
+
     // 4. Process video files
     for (index, path) in video_paths.into_iter().enumerate() {
+        // Check if user requested to stop scan
+        let stop_requested: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scan_stop_requested'")
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+        if let Some(val) = stop_requested {
+            if val == "true" {
+                info!("Scan stopped by user request.");
+                break;
+            }
+        }
         // Emit progress before starting analysis
         let progress = if total_files > 0 {
             ((index as f64) / (total_files as f64) * 100.0) as i32
@@ -1250,7 +1269,7 @@ pub async fn scan_directory(
                     .await?;
             }
 
-            // Populate Automated Tags: "Documentary", "TV show", "Late Night", "Movie"
+            // Populate Automated Tags: "Documentary", "TV show", "Movie", "Shorts", "Animation"
             let mut auto_tags = Vec::new();
             if media_type == "Movie" {
                 auto_tags.push("Movie".to_string());
@@ -1260,6 +1279,12 @@ pub async fn scan_directory(
             }
             if media_type == "Documentary" || online.genres.iter().any(|g| g.to_lowercase().contains("documentary")) {
                 auto_tags.push("Documentary".to_string());
+            }
+            if duration > 0 && duration < 1800 {
+                auto_tags.push("Shorts".to_string());
+            }
+            if online.directors.iter().any(|d| d.to_lowercase().contains("walt disney")) || online.genres.iter().any(|g| g.to_lowercase().contains("animation")) {
+                auto_tags.push("Animation".to_string());
             }
 
 

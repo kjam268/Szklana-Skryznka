@@ -45,7 +45,7 @@ function App() {
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
       
       {/* Main Pages viewport canvas */}
-      <main className="flex-1 h-full flex flex-col overflow-hidden relative">
+      <main className="flex-1 h-full flex flex-col overflow-hidden relative pl-16">
         {/* Scanline overlay for subtle retro NASA control room aesthetic */}
         <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.15)_50%)] bg-[size:100%_4px] pointer-events-none z-40 opacity-30" />
         
