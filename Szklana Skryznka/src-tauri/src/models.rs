@@ -63,6 +63,14 @@ pub struct MediaFile {
     pub quality_score_done: Option<i32>,
     pub audio_tracks: Option<String>,
     pub embedded_subtitles: Option<String>,
+    pub color_space: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_primaries: Option<String>,
+    pub video_profile: Option<String>,
+    pub video_level: Option<i64>,
+    pub audio_sample_rate: Option<String>,
+    pub ebur128_loudness: Option<f64>,
+    pub vmaf_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

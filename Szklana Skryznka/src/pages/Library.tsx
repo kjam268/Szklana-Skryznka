@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useLibraryStore, MediaItemDetails, Subtitle } from "../store";
-import { Search, Film, Calendar, Star, FileText, CheckCircle, XCircle, Settings, Upload, Trash2, FolderOpen, RefreshCw, Crown, Heart } from "lucide-react";
+import { useLibraryStore, MediaItemDetails, useNotificationStore } from "../store";
+import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
-    items, isLoading, isScanning, scanProgress, scanLogs, searchQuery, selectedType, 
-    fetchItems, scanLibrary, saveMetadata, deleteItem, setSearchQuery, setSelectedType 
+    items, isLoading, isScanning, scanProgress, scanLogs, searchQuery, 
+    fetchItems, scanLibrary, saveMetadata, deleteItem, setSearchQuery 
   } = useLibraryStore();
+  const showToast = useNotificationStore((state) => state.showToast);
 
   const [selectedItem, setSelectedItem] = useState<MediaItemDetails | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -54,29 +55,13 @@ export const Library: React.FC = () => {
   const [osResults, setOsResults] = useState<any[]>([]);
   const [isSearchingOs, setIsSearchingOs] = useState(false);
   const [downloadingOsId, setDownloadingOsId] = useState<number | null>(null);
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   // Subtitle import fields
   const [subLang, setSubLang] = useState("en");
   const [subPath, setSubPath] = useState("");
 
-  const [tmdbApiKey, setTmdbApiKey] = useState("");
 
-  useEffect(() => {
-    invoke<string | null>("get_setting", { key: "tmdb_api_key" })
-      .then((key) => {
-        if (key) setTmdbApiKey(key);
-      })
-      .catch(console.error);
-  }, []);
-
-  const handleSaveTmdbKey = async (val: string) => {
-    setTmdbApiKey(val);
-    try {
-      await invoke("set_setting", { key: "tmdb_api_key", value: val });
-    } catch (e) {
-      console.error("Failed to save TMDB key:", e);
-    }
-  };
 
   useEffect(() => {
     fetchItems();
@@ -147,6 +132,7 @@ export const Library: React.FC = () => {
     setEditRtScore(details.item.rt_score || "");
     setEditImdbScore(details.item.imdb_score || "");
     setManualSearchQuery("");
+    setIsConfirmingDelete(false);
   };
 
   const handleSaveMetadata = async () => {
@@ -161,10 +147,10 @@ export const Library: React.FC = () => {
         runtime: editRuntime,
         synopsis: editSynopsis,
         rating: editRating,
-        poster_path: editPoster,
-        backdrop_path: editBackdrop,
-        rt_score: editRtScore || null,
-        imdb_score: editImdbScore || null,
+        poster_path: editPoster || undefined,
+        backdrop_path: editBackdrop || undefined,
+        rt_score: editRtScore || undefined,
+        imdb_score: editImdbScore || undefined,
       },
       genres: editGenres.split(",").map((g) => g.trim()).filter((g) => g !== ""),
       tags: (() => {
@@ -182,7 +168,7 @@ export const Library: React.FC = () => {
     };
     await saveMetadata(updated);
     setSelectedItem(updated);
-    alert("Metadata updated successfully!");
+    showToast("Metadata updated successfully!", "success");
   };
 
   const handleImportSubtitle = async () => {
@@ -196,12 +182,12 @@ export const Library: React.FC = () => {
         subtitleType: "external",
         filePath: subPath 
       });
-      alert("Subtitle file imported!");
+      showToast("Subtitle file imported!", "success");
       setSubPath("");
       // Refresh items
       await fetchItems();
     } catch (e) {
-      alert(`Import failed: ${e}`);
+      showToast(`Import failed: ${e}`, "error");
     }
   };
 
@@ -214,11 +200,11 @@ export const Library: React.FC = () => {
       const results = await invoke<any[]>("search_opensubtitles", { itemId: selectedItem.item.id });
       setOsResults(results);
       if (results.length === 0) {
-        alert("No subtitles found on OpenSubtitles for this item.");
+        showToast("No subtitles found on OpenSubtitles for this item.", "info");
       }
     } catch (e) {
       console.error("OpenSubtitles search failed:", e);
-      alert(`Search failed: ${e}`);
+      showToast(`Search failed: ${e}`, "error");
     } finally {
       setIsSearchingOs(false);
     }
@@ -234,7 +220,7 @@ export const Library: React.FC = () => {
         fileId,
         language
       });
-      alert(`Successfully downloaded and imported ${language.toUpperCase()} subtitle track!`);
+      showToast(`Successfully downloaded and imported ${language.toUpperCase()} subtitle track!`, "success");
       
       // Refresh library list
       await fetchItems(true);
@@ -249,7 +235,7 @@ export const Library: React.FC = () => {
       setOsResults(prev => prev.filter(r => r.file_id !== fileId));
     } catch (e) {
       console.error("OpenSubtitles download failed:", e);
-      alert(`Download failed: ${e}`);
+      showToast(`Download failed: ${e}`, "error");
     } finally {
       setDownloadingOsId(null);
     }
@@ -257,13 +243,13 @@ export const Library: React.FC = () => {
 
   const handleScan = async () => {
     if (!scanPath) {
-      alert("Please enter a valid path to scan");
+      showToast("Please enter a valid path to scan", "error");
       return;
     }
     try {
       await scanLibrary(scanPath);
     } catch (e) {
-      alert(`Scan failed: ${e}`);
+      showToast(`Scan failed: ${e}`, "error");
     }
   };
 
@@ -335,8 +321,11 @@ export const Library: React.FC = () => {
       const durB = b.item.runtime ?? 0;
       return durB - durA;
     }
-    if (sortBy === "date_added") {
-      return (b.item.created_at || "").localeCompare(a.item.created_at || "");
+    if (sortBy === "release_date") {
+      const yA = a.item.year ?? 0;
+      const yB = b.item.year ?? 0;
+      if (yA !== yB) return yB - yA;
+      return a.item.title.localeCompare(b.item.title);
     }
     return 0;
   });
@@ -415,7 +404,7 @@ export const Library: React.FC = () => {
                 <option value="imdb_score" className="bg-gray-950 text-gray-200">IMDb Score</option>
                 <option value="rotten_tomatoes" className="bg-gray-950 text-gray-200">Rotten Tomatoes</option>
                 <option value="duration" className="bg-gray-950 text-gray-200">Duration</option>
-                <option value="date_added" className="bg-gray-950 text-gray-200">Date Added</option>
+                <option value="release_date" className="bg-gray-950 text-gray-200">Release Date</option>
               </select>
             </div>
           </div>
@@ -545,6 +534,40 @@ export const Library: React.FC = () => {
                                 </div>
                               )}
                               
+                              {/* Classic Film Toggle Overlay (Top Right) */}
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  const isClassic = details.tags.includes("Classic");
+                                  let newTags;
+                                  if (isClassic) {
+                                    newTags = details.tags.filter(t => t !== "Classic");
+                                  } else {
+                                    newTags = [...details.tags, "Classic"];
+                                  }
+                                  
+                                  try {
+                                    const updatedDetails = {
+                                      ...details,
+                                      tags: newTags,
+                                    };
+                                    const { invoke } = await import("@tauri-apps/api/core");
+                                    await invoke("save_media", { details: updatedDetails });
+                                    await fetchItems(true);
+                                    showToast(isClassic ? "Removed from Classics" : "Added to Classics", "success");
+                                  } catch (err) {
+                                    console.error("Failed to toggle classic:", err);
+                                  }
+                                }}
+                                className="absolute top-2 right-8 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                                title={details.tags.includes("Classic") ? "Remove from Classics" : "Mark as Classic"}
+                              >
+                                <Film 
+                                  size={15} 
+                                  className={details.tags.includes("Classic") ? "text-cyan-400 fill-cyan-400 hover:text-cyan-500" : "text-gray-400 hover:text-cyan-400"}
+                                />
+                              </button>
+
                               {/* Favorites Star Toggle Overlay (Top Right) */}
                               <button
                                 onClick={async (e) => {
@@ -565,6 +588,7 @@ export const Library: React.FC = () => {
                                     const { invoke } = await import("@tauri-apps/api/core");
                                     await invoke("save_media", { details: updatedDetails });
                                     await fetchItems(true);
+                                    showToast(isFav ? "Removed from Favorites" : "Added to Favorites", "success");
                                   } catch (err) {
                                     console.error("Failed to toggle favorite:", err);
                                   }
@@ -581,14 +605,14 @@ export const Library: React.FC = () => {
                               {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
                               <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
                                 {details.item.imdb_score && (
-                                  <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg">
+                                  <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[17px]">
                                     IMDb {details.item.imdb_score}
                                   </span>
                                 )}
                                 {details.item.rt_score && (
-                                  <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center space-x-0.5">
-                                    <span>🍅</span>
-                                    <span>{details.item.rt_score}</span>
+                                  <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[17px]">
+                                    <span className="text-[9px] leading-none">🍅</span>
+                                    <span className="leading-none">{details.item.rt_score}</span>
                                   </span>
                                 )}
                               </div>
@@ -675,6 +699,41 @@ export const Library: React.FC = () => {
                                SEASON {sNum}
                              </div>
 
+                             {/* Classic Film Toggle Overlay (Top Right) */}
+                             <button
+                               onClick={async (e) => {
+                                 e.stopPropagation();
+                                 const isClassic = seasonGroup.some(details => details.tags.includes("Classic"));
+                                 try {
+                                   const { invoke } = await import("@tauri-apps/api/core");
+                                   for (const details of seasonGroup) {
+                                     const alreadyClassic = details.tags.includes("Classic");
+                                     let newTags;
+                                     if (isClassic && alreadyClassic) {
+                                       newTags = details.tags.filter(t => t !== "Classic");
+                                     } else if (!isClassic && !alreadyClassic) {
+                                       newTags = [...details.tags, "Classic"];
+                                     } else {
+                                       continue;
+                                     }
+                                     const updatedDetails = { ...details, tags: newTags };
+                                     await invoke("save_media", { details: updatedDetails });
+                                   }
+                                   await fetchItems(true);
+                                   showToast(isClassic ? "Removed Season from Classics" : "Added Season to Classics", "success");
+                                 } catch (err) {
+                                   console.error("Failed to toggle classic for season:", err);
+                                 }
+                               }}
+                               className="absolute top-2 right-8 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                               title={seasonGroup.some(details => details.tags.includes("Classic")) ? "Remove Season from Classics" : "Mark Season as Classic"}
+                             >
+                               <Film 
+                                 size={15} 
+                                 className={seasonGroup.some(details => details.tags.includes("Classic")) ? "text-cyan-400 fill-cyan-400 hover:text-cyan-500" : "text-gray-400 hover:text-cyan-400"}
+                               />
+                             </button>
+
                              {/* Favorites Star Toggle Overlay (Top Right) */}
                              <button
                                onClick={async (e) => {
@@ -696,6 +755,7 @@ export const Library: React.FC = () => {
                                      await invoke("save_media", { details: updatedDetails });
                                    }
                                    await fetchItems(true);
+                                   showToast(isFav ? "Removed Season from Favorites" : "Added Season to Favorites", "success");
                                  } catch (err) {
                                    console.error("Failed to toggle favorite for season:", err);
                                  }
@@ -757,9 +817,9 @@ export const Library: React.FC = () => {
                   const getAvgDur = (g: any[]) => g.reduce((sum, item) => sum + (item.item.runtime ?? 0), 0) / g.length;
                   return getAvgDur(groupB) - getAvgDur(groupA);
                 }
-                if (sortBy === "date_added") {
-                  const getNewestDate = (g: any[]) => g.map(item => item.item.created_at || "").sort().pop() || "";
-                  return getNewestDate(groupB).localeCompare(getNewestDate(groupA));
+                if (sortBy === "release_date") {
+                  const getNewestYear = (g: any[]) => Math.max(...g.map(item => item.item.year ?? 0));
+                  return getNewestYear(groupB) - getNewestYear(groupA);
                 }
                 return 0;
               });
@@ -795,6 +855,41 @@ export const Library: React.FC = () => {
                             TV SHOW
                           </div>
 
+                          {/* Classic Film Toggle Overlay (Top Right) */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const isClassic = group.some(details => details.tags.includes("Classic"));
+                              try {
+                                const { invoke } = await import("@tauri-apps/api/core");
+                                for (const details of group) {
+                                  const alreadyClassic = details.tags.includes("Classic");
+                                  let newTags;
+                                  if (isClassic && alreadyClassic) {
+                                    newTags = details.tags.filter(t => t !== "Classic");
+                                  } else if (!isClassic && !alreadyClassic) {
+                                    newTags = [...details.tags, "Classic"];
+                                  } else {
+                                    continue;
+                                  }
+                                  const updatedDetails = { ...details, tags: newTags };
+                                  await invoke("save_media", { details: updatedDetails });
+                                }
+                                await fetchItems(true);
+                                showToast(isClassic ? "Removed Show from Classics" : "Added Show to Classics", "success");
+                              } catch (err) {
+                                console.error("Failed to toggle classic for show:", err);
+                              }
+                            }}
+                            className="absolute top-2 right-8 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                            title={group.some(details => details.tags.includes("Classic")) ? "Remove Show from Classics" : "Mark Show as Classic"}
+                          >
+                            <Film 
+                              size={15} 
+                              className={group.some(details => details.tags.includes("Classic")) ? "text-cyan-400 fill-cyan-400 hover:text-cyan-500" : "text-gray-400 hover:text-cyan-400"}
+                            />
+                          </button>
+
                           {/* Favorites Star Toggle Overlay (Top Right) */}
                           <button
                             onClick={async (e) => {
@@ -816,6 +911,7 @@ export const Library: React.FC = () => {
                                   await invoke("save_media", { details: updatedDetails });
                                 }
                                 await fetchItems(true);
+                                showToast(isFav ? "Removed Show from Favorites" : "Added Show to Favorites", "success");
                               } catch (err) {
                                 console.error("Failed to toggle favorite for show:", err);
                               }
@@ -860,16 +956,14 @@ export const Library: React.FC = () => {
                 }
               });
 
-              // Add TV Show folders to the list if selectedTab is "All"
-              if (selectedTab === "All") {
-                Object.keys(groupedEpisodes).forEach((showName) => {
-                  renderList.push({
-                    isShowFolder: true,
-                    showName,
-                    episodes: groupedEpisodes[showName],
-                  });
+              // Add TV Show folders to the list
+              Object.keys(groupedEpisodes).forEach((showName) => {
+                renderList.push({
+                  isShowFolder: true,
+                  showName,
+                  episodes: groupedEpisodes[showName],
                 });
-              }
+              });
 
               // Sort the final mixed renderList using the chosen sortBy
               const sortedRenderList = [...renderList].sort((a, b) => {
@@ -905,13 +999,12 @@ export const Library: React.FC = () => {
                   return x.item.runtime ?? 0;
                 };
 
-                const getDate = (x: any) => {
+                const getYear = (x: any) => {
                   if ('isShowFolder' in x) {
-                    const dates = x.episodes.map((e: any) => e.item.created_at || "");
-                    dates.sort();
-                    return dates[dates.length - 1] || "";
+                    const years = x.episodes.map((e: any) => e.item.year).filter((y: any) => y !== undefined && y !== null);
+                    return years.length === 0 ? 0 : Math.max(...years);
                   }
-                  return x.item.created_at || "";
+                  return x.item.year ?? 0;
                 };
 
                 const getTitleStr = (x: any) => {
@@ -936,8 +1029,11 @@ export const Library: React.FC = () => {
                 if (sortBy === "duration") {
                   return getDur(b) - getDur(a);
                 }
-                if (sortBy === "date_added") {
-                  return getDate(b).localeCompare(getDate(a));
+                if (sortBy === "release_date") {
+                  if (getYear(b) !== getYear(a)) {
+                    return getYear(b) - getYear(a);
+                  }
+                  return getTitleStr(a).localeCompare(getTitleStr(b));
                 }
                 return 0;
               });
@@ -976,6 +1072,41 @@ export const Library: React.FC = () => {
                               TV SHOW
                             </div>
 
+                            {/* Classic Film Toggle Overlay (Top Right) */}
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                const isClassic = group.some(details => details.tags.includes("Classic"));
+                                try {
+                                  const { invoke } = await import("@tauri-apps/api/core");
+                                  for (const details of group) {
+                                    const alreadyClassic = details.tags.includes("Classic");
+                                    let newTags;
+                                    if (isClassic && alreadyClassic) {
+                                      newTags = details.tags.filter(t => t !== "Classic");
+                                    } else if (!isClassic && !alreadyClassic) {
+                                      newTags = [...details.tags, "Classic"];
+                                    } else {
+                                      continue;
+                                    }
+                                    const updatedDetails = { ...details, tags: newTags };
+                                    await invoke("save_media", { details: updatedDetails });
+                                  }
+                                  await fetchItems(true);
+                                  showToast(isClassic ? "Removed Show from Classics" : "Added Show to Classics", "success");
+                                } catch (err) {
+                                  console.error("Failed to toggle classic for show:", err);
+                                }
+                              }}
+                              className="absolute top-2 right-8 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                              title={group.some(details => details.tags.includes("Classic")) ? "Remove Show from Classics" : "Mark Show as Classic"}
+                            >
+                              <Film 
+                                size={15} 
+                                className={group.some(details => details.tags.includes("Classic")) ? "text-cyan-400 fill-cyan-400 hover:text-cyan-500" : "text-gray-400 hover:text-cyan-400"}
+                              />
+                            </button>
+
                             {/* Favorites Star Toggle Overlay (Top Right) */}
                             <button
                               onClick={async (e) => {
@@ -997,6 +1128,7 @@ export const Library: React.FC = () => {
                                     await invoke("save_media", { details: updatedDetails });
                                   }
                                   await fetchItems(true);
+                                  showToast(isFav ? "Removed Show from Favorites" : "Added Show to Favorites", "success");
                                 } catch (err) {
                                   console.error("Failed to toggle favorite for show:", err);
                                 }
@@ -1046,6 +1178,40 @@ export const Library: React.FC = () => {
                             </div>
                           )}
                           
+                          {/* Classic Film Toggle Overlay (Top Right) */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const isClassic = details.tags.includes("Classic");
+                              let newTags;
+                              if (isClassic) {
+                                newTags = details.tags.filter(t => t !== "Classic");
+                              } else {
+                                newTags = [...details.tags, "Classic"];
+                              }
+                              
+                              try {
+                                const updatedDetails = {
+                                  ...details,
+                                  tags: newTags,
+                                };
+                                const { invoke } = await import("@tauri-apps/api/core");
+                                await invoke("save_media", { details: updatedDetails });
+                                await fetchItems(true);
+                                showToast(isClassic ? "Removed from Classics" : "Added to Classics", "success");
+                              } catch (err) {
+                                console.error("Failed to toggle classic:", err);
+                              }
+                            }}
+                            className="absolute top-2 right-8 focus:outline-none transition-transform duration-200 active:scale-75 z-20 drop-shadow-md"
+                            title={details.tags.includes("Classic") ? "Remove from Classics" : "Mark as Classic"}
+                          >
+                            <Film 
+                              size={15} 
+                              className={details.tags.includes("Classic") ? "text-cyan-400 fill-cyan-400 hover:text-cyan-500" : "text-gray-400 hover:text-cyan-400"}
+                            />
+                          </button>
+
                           {/* Favorites Star Toggle Overlay (Top Right) */}
                           <button
                             onClick={async (e) => {
@@ -1066,6 +1232,7 @@ export const Library: React.FC = () => {
                                 const { invoke } = await import("@tauri-apps/api/core");
                                 await invoke("save_media", { details: updatedDetails });
                                 await fetchItems(true);
+                                showToast(isFav ? "Removed from Favorites" : "Added to Favorites", "success");
                               } catch (err) {
                                 console.error("Failed to toggle favorite:", err);
                               }
@@ -1082,14 +1249,14 @@ export const Library: React.FC = () => {
                           {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
                           <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
                             {details.item.imdb_score && (
-                              <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg">
+                              <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[17px]">
                                 IMDb {details.item.imdb_score}
                               </span>
                             )}
                             {details.item.rt_score && (
-                              <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1 py-0.5 rounded text-[7.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center space-x-0.5">
-                                <span>🍅</span>
-                                <span>{details.item.rt_score}</span>
+                              <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[17px]">
+                                <span className="text-[9px] leading-none">🍅</span>
+                                <span className="leading-none">{details.item.rt_score}</span>
                               </span>
                             )}
                           </div>
@@ -1195,7 +1362,7 @@ export const Library: React.FC = () => {
                         await fetchItems(true);
                       }
                     } catch (err) {
-                      alert(`Failed to select custom poster: ${err}`);
+                      showToast(`Failed to select custom poster: ${err}`, "error");
                     }
                   }}
                   className="absolute inset-0 bg-black/75 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center text-white space-y-1 cursor-pointer focus:outline-none"
@@ -1491,14 +1658,14 @@ export const Library: React.FC = () => {
                   try {
                     const { invoke } = await import("@tauri-apps/api/core");
                     await invoke("refresh_item_metadata", { itemId: selectedItem.item.id, searchOverride: manualSearchQuery || null });
-                    alert("Metadata successfully refreshed from online API!");
+                    showToast("Metadata successfully refreshed from online API!", "success");
                     await fetchItems();
                     const updated = useLibraryStore.getState().items.find(i => i.item.id === selectedItem.item.id);
                     if (updated) {
                       handleSelectCard(updated);
                     }
                   } catch (e) {
-                    alert(`Failed to refresh metadata: ${e}`);
+                    showToast(`Failed to refresh metadata: ${e}`, "error");
                   } finally {
                     setIsRefreshing(false);
                   }
@@ -1510,25 +1677,53 @@ export const Library: React.FC = () => {
                 <span>{isRefreshing ? "REFRESHING..." : "REFRESH FROM ONLINE"}</span>
               </button>
 
-              <div className="flex space-x-3">
-                <button
-                  onClick={handleSaveMetadata}
-                  className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors focus:outline-none"
-                >
-                  SAVE CHANGES
-                </button>
-                <button
-                  onClick={async () => {
-                    if (confirm("Delete this media item permanently from library?")) {
-                      await deleteItem(selectedItem.item.id);
-                      setSelectedItem(null);
-                    }
-                  }}
-                  className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors focus:outline-none"
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
+              {isConfirmingDelete ? (
+                <div className="bg-rose-950/20 border border-rose-900/60 rounded-lg p-3 space-y-3">
+                  <div className="text-xs text-rose-300 font-medium leading-relaxed">
+                    Are you sure you want to delete this media item permanently from the library?
+                  </div>
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => setIsConfirmingDelete(false)}
+                      className="flex-1 bg-gray-800 text-gray-200 text-xs py-1.5 rounded hover:bg-gray-700 transition-colors font-semibold"
+                    >
+                      CANCEL
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await deleteItem(selectedItem.item.id);
+                          setSelectedItem(null);
+                          setIsConfirmingDelete(false);
+                          showToast("Media item deleted from library", "success");
+                        } catch (err) {
+                          console.error("Failed to delete item:", err);
+                          showToast("Failed to delete item", "error");
+                        }
+                      }}
+                      className="flex-1 bg-rose-600 text-white text-xs py-1.5 rounded hover:bg-rose-500 transition-colors font-semibold"
+                    >
+                      DELETE
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex space-x-3">
+                  <button
+                    onClick={handleSaveMetadata}
+                    className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors focus:outline-none"
+                  >
+                    SAVE CHANGES
+                  </button>
+                  <button
+                    onClick={() => setIsConfirmingDelete(true)}
+                    className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors focus:outline-none"
+                    title="Delete item from library"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}

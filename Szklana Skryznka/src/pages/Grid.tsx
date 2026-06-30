@@ -1,12 +1,11 @@
 import React, { useEffect, useState, useRef } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, useScheduleStore, useChannelStore, MediaItemDetails, ScheduleEntryDetails } from "../store";
-import { Calendar, Clock, Plus, Zap, AlertCircle, LayoutGrid, CheckCircle2, Sliders, ChevronLeft, ChevronRight } from "lucide-react";
+import { Calendar, Clock, AlertCircle, LayoutGrid, ChevronLeft, ChevronRight } from "lucide-react";
 
 export const Grid: React.FC = () => {
   const { items, fetchItems } = useLibraryStore();
-  const { entries, fetchEntries, selectedProfile, setSelectedProfile, selectedPolicy, setSelectedPolicy, generateSchedule } = useScheduleStore();
+  const { entries, fetchEntries } = useScheduleStore();
   const { channels, fetchChannels } = useChannelStore();
   
   // Snap rolling week to start on the current week's Monday at 07:00

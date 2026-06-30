@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { AllCommunityModule, ModuleRegistry } from 'ag-grid-community';
 import { useLibraryStore, MediaItemDetails } from "../store";
-import { Database, FileSpreadsheet, Download, Upload, AlertCircle, Trash } from "lucide-react";
+import { Database, Download, Upload } from "lucide-react";
 
 // Register all community modules for AG Grid
 ModuleRegistry.registerModules([AllCommunityModule]);
@@ -12,7 +12,7 @@ import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-alpine.css";
 
 export const DatabaseViewer: React.FC = () => {
-  const { items, fetchItems, saveMetadata, deleteItem } = useLibraryStore();
+  const { items, fetchItems, saveMetadata } = useLibraryStore();
   const [rowData, setRowData] = useState<any[]>([]);
   const gridRef = useRef<AgGridReact>(null);
 

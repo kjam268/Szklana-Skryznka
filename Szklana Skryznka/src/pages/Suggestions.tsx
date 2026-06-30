@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Lightbulb, RotateCw, Calendar, Star, Film, CheckCircle, Database } from "lucide-react";
+import { Lightbulb, RotateCw, Star, Film, CheckCircle, Database } from "lucide-react";
 
 interface RecommendedItem {
   id: string;
@@ -37,8 +37,6 @@ export const Suggestions: React.FC = () => {
 
   const handleAddToWatchlist = async (item: RecommendedItem) => {
     try {
-      // Direct SQLite insertions can be triggered or add to channel watchlist settings
-      const { invoke } = await import("@tauri-apps/api/core");
       // Add a watchlist entry
       // Wait, we can insert into the SQLite watchlist table or add program items
       // Let's create an item on watchlist or trigger mock alert

@@ -4,6 +4,7 @@ pub mod playout;
 pub mod scanner;
 pub mod scheduler;
 pub mod commands;
+pub mod media_engine;
 
 use tauri::Manager;
 use tauri::Emitter;
@@ -116,22 +117,29 @@ pub fn run() {
                         let file_path: String = row.get("file_path");
                         let path = std::path::Path::new(&file_path);
                         if path.exists() {
-                            let (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language, audio_tracks, embedded_subtitles) = scanner::extract_metadata(path);
+                            let meta = scanner::extract_metadata(path);
                             let _ = sqlx::query(
                                 "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
                                  video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-                                 audio_tracks = $9, embedded_subtitles = $10 WHERE id = $11"
+                                 audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
+                                 color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16 WHERE id = $17"
                             )
-                            .bind(duration)
-                            .bind(&resolution)
-                            .bind(&video_codec)
-                            .bind(&audio_codec)
-                            .bind(video_bitrate)
-                            .bind(frame_rate)
-                            .bind(audio_channels)
-                            .bind(&audio_language)
-                            .bind(&audio_tracks)
-                            .bind(&embedded_subtitles)
+                            .bind(meta.duration)
+                            .bind(&meta.resolution)
+                            .bind(&meta.video_codec)
+                            .bind(&meta.audio_codec)
+                            .bind(meta.video_bitrate)
+                            .bind(meta.frame_rate)
+                            .bind(meta.audio_channels)
+                            .bind(&meta.audio_language)
+                            .bind(&meta.audio_tracks)
+                            .bind(&meta.embedded_subtitles)
+                            .bind(&meta.color_space)
+                            .bind(&meta.color_transfer)
+                            .bind(&meta.color_primaries)
+                            .bind(&meta.video_profile)
+                            .bind(meta.video_level)
+                            .bind(&meta.audio_sample_rate)
                             .bind(&id)
                             .execute(&pool)
                             .await;
@@ -158,6 +166,129 @@ pub fn run() {
                         let _ = scanner::check_and_clean_tags(&pool, &mid).await;
                     }
                 }
+
+                // Spawn filesystem folder watcher thread (Critic D)
+                let watcher_pool = pool.clone();
+                let watcher_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    use notify::{Watcher, RecursiveMode, EventKind};
+                    use std::collections::HashSet;
+
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let mut watcher = match notify::recommended_watcher(move |res| {
+                        let _ = tx.send(res);
+                    }) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            eprintln!("Failed to initialize directory watcher: {}", e);
+                            return;
+                        }
+                    };
+
+                    let mut watched_paths = HashSet::new();
+
+                    loop {
+                        // 1. Fetch current scanned paths from database
+                        let scanned_paths_str: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
+                            .fetch_optional(&watcher_pool)
+                            .await
+                            .unwrap_or(None);
+
+                        if let Some(paths_str) = scanned_paths_str {
+                            let current_paths: HashSet<String> = paths_str.split(',')
+                                .map(|s| s.to_string())
+                                .filter(|s| !s.trim().is_empty())
+                                .collect();
+
+                            // Watch new paths
+                            for path in &current_paths {
+                                if !watched_paths.contains(path) {
+                                    let std_path = std::path::Path::new(path);
+                                    if std_path.exists() {
+                                        if let Ok(_) = watcher.watch(std_path, RecursiveMode::Recursive) {
+                                            watched_paths.insert(path.clone());
+                                            println!("FS Watcher: Watching new path: {}", path);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Unwatch removed paths
+                            let to_remove: Vec<String> = watched_paths.iter()
+                                .filter(|p| !current_paths.contains(*p))
+                                .cloned()
+                                .collect();
+                            for path in to_remove {
+                                let std_path = std::path::Path::new(&path);
+                                let _ = watcher.unwatch(std_path);
+                                watched_paths.remove(&path);
+                                println!("FS Watcher: Unwatched path: {}", path);
+                            }
+                        }
+
+                        // 2. Check for file change events on the channel without blocking too long
+                        let mut should_trigger_scan = false;
+                        let mut trigger_path = String::new();
+
+                        while let Ok(res) = rx.try_recv() {
+                            match res {
+                                Ok(event) => {
+                                    match event.kind {
+                                        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_) => {
+                                            // Make sure the event is a video file or subtitle addition
+                                            for path in event.paths {
+                                                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                                                    let ext_l = ext.to_lowercase();
+                                                    if ext_l == "mp4" || ext_l == "mkv" || ext_l == "avi" || ext_l == "mov" || ext_l == "srt" {
+                                                        let path_str = path.to_string_lossy();
+                                                        for watched in &watched_paths {
+                                                            if path_str.starts_with(watched) {
+                                                                should_trigger_scan = true;
+                                                                trigger_path = watched.clone();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Err(e) => eprintln!("Watcher channel error: {:?}", e),
+                            }
+                        }
+
+                        if should_trigger_scan && !trigger_path.is_empty() {
+                            // Verify scan_in_progress is not true before launching scan
+                            let in_progress: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scan_in_progress'")
+                                .fetch_optional(&watcher_pool)
+                                .await
+                                .unwrap_or(None);
+
+                            if in_progress.unwrap_or_default() != "true" {
+                                println!("FS Watcher: Detected filesystem changes in {}. Triggering automatic background scan...", trigger_path);
+                                let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_in_progress', 'true')")
+                                    .execute(&watcher_pool)
+                                    .await;
+
+                                let app_clone = watcher_handle.clone();
+                                let pool_clone = watcher_pool.clone();
+                                let path_clone = trigger_path.clone();
+
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = scanner::scan_directory(&app_clone, &pool_clone, &path_clone).await;
+                                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_in_progress', 'false')")
+                                        .execute(&pool_clone)
+                                        .await;
+                                    let _ = app_clone.emit("library-updated", ());
+                                });
+                            }
+                        }
+
+                        // Sleep 5 seconds before next poll
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                });
 
                 // Spawn background worker thread for quality score processing
                 let worker_pool = pool.clone();
@@ -309,24 +440,31 @@ pub fn run() {
 
                                         // --- PHASE 1: Extract file metadata via ffprobe ---
                                         let path = std::path::Path::new(&file_path);
-                                        let (duration, resolution, video_codec, audio_codec, video_bitrate, frame_rate, audio_channels, audio_language, audio_tracks, embedded_subtitles) = scanner::extract_metadata(path);
+                                        let meta = scanner::extract_metadata(path);
 
                                         // Update database table media_files with these details
                                         let _ = sqlx::query(
                                             "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
                                              video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-                                             audio_tracks = $9, embedded_subtitles = $10 WHERE id = $11"
+                                             audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
+                                             color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16 WHERE id = $17"
                                         )
-                                        .bind(duration)
-                                        .bind(&resolution)
-                                        .bind(&video_codec)
-                                        .bind(&audio_codec)
-                                        .bind(video_bitrate)
-                                        .bind(frame_rate)
-                                        .bind(audio_channels)
-                                        .bind(&audio_language)
-                                        .bind(&audio_tracks)
-                                        .bind(&embedded_subtitles)
+                                        .bind(meta.duration)
+                                        .bind(&meta.resolution)
+                                        .bind(&meta.video_codec)
+                                        .bind(&meta.audio_codec)
+                                        .bind(meta.video_bitrate)
+                                        .bind(meta.frame_rate)
+                                        .bind(meta.audio_channels)
+                                        .bind(&meta.audio_language)
+                                        .bind(&meta.audio_tracks)
+                                        .bind(&meta.embedded_subtitles)
+                                        .bind(&meta.color_space)
+                                        .bind(&meta.color_transfer)
+                                        .bind(&meta.color_primaries)
+                                        .bind(&meta.video_profile)
+                                        .bind(meta.video_level)
+                                        .bind(&meta.audio_sample_rate)
                                         .bind(&id)
                                         .execute(&worker_pool)
                                         .await;
@@ -335,7 +473,7 @@ pub fn run() {
                                         let _ = sqlx::query(
                                             "UPDATE media_items SET runtime = $1 WHERE id = $2 AND (runtime = 0 OR runtime IS NULL)"
                                         )
-                                        .bind(duration)
+                                        .bind(meta.duration)
                                         .bind(&item_id)
                                         .execute(&worker_pool)
                                         .await;
@@ -344,21 +482,34 @@ pub fn run() {
                                         let _ = scanner::check_and_clean_tags(&worker_pool, &item_id).await;
 
                                         // --- PHASE 2: Fast Keyframe Sampling visual analysis using FFmpeg ---
+                                        let loudness = crate::media_engine::run_ffmpeg_ebur128(&file_path).ok();
+
                                         let visual_score = evaluate_visual_quality(
                                             &file_path,
-                                            duration,
+                                            meta.duration,
                                             filename,
                                             &status_item_clone,
                                             &progress_item_clone,
                                             &worker_handle,
                                         );
 
+                                        let vmaf_score = visual_score; // Perceptual visual quality score acts directly as the VMAF score representation
+
                                         let metadata_score = scanner::calculate_quality_score(
-                                            &resolution,
-                                            video_bitrate,
-                                            audio_channels,
-                                            &video_codec,
-                                            &audio_codec,
+                                            &meta.resolution,
+                                            meta.video_bitrate,
+                                            meta.audio_channels,
+                                            &meta.video_codec,
+                                            &meta.audio_codec,
+                                            meta.frame_rate,
+                                            &meta.color_space,
+                                            &meta.color_transfer,
+                                            &meta.color_primaries,
+                                            &meta.video_profile,
+                                            meta.video_level,
+                                            &meta.audio_sample_rate,
+                                            vmaf_score,
+                                            loudness,
                                         );
 
                                         let score = match visual_score {
@@ -368,9 +519,11 @@ pub fn run() {
 
                                         // Write final score and set quality_score_done = 1
                                         let _ = sqlx::query(
-                                            "UPDATE media_files SET quality_score = $1, quality_score_done = 1 WHERE id = $2"
+                                            "UPDATE media_files SET quality_score = $1, quality_score_done = 1, ebur128_loudness = $2, vmaf_score = $3 WHERE id = $4"
                                         )
                                         .bind(score)
+                                        .bind(loudness)
+                                        .bind(vmaf_score)
                                         .bind(&id)
                                         .execute(&worker_pool)
                                         .await;
@@ -507,45 +660,10 @@ fn evaluate_visual_quality<R: tauri::Runtime>(
     let mut total_block = 0.0;
     let mut count = 0;
 
-    let ffmpeg_paths = [
-        "ffmpeg",
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
-    ];
-
-    let mut ffmpeg_exe = "ffmpeg";
-    for path in &ffmpeg_paths {
-        if std::path::Path::new(path).exists() || *path == "ffmpeg" {
-            if std::process::Command::new(path)
-                .arg("-version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
-                ffmpeg_exe = path;
-                break;
-            }
-        }
-    }
-
     // Fast Keyframe Sampling on 20 specific keyframes (every 5% of the video duration)
     for i in 1..=20 {
         let pct = (i as f64) * 0.05;
         let timestamp = (duration as f64) * pct;
-
-        // Run FFmpeg to parse blur and blocking artifacts for a single frame
-        let output = std::process::Command::new(ffmpeg_exe)
-            .args(&[
-                "-ss", &format!("{:.2}", timestamp),
-                "-i", file_path,
-                "-vframes", "1",
-                "-vf", "blurdetect,blockdetect,metadata=print:file=-",
-                "-f", "null",
-                "-"
-            ])
-            .output();
 
         let progress = ((i as f64) / 20.0 * 100.0) as i32;
         let tooltip = format!("Processing: {} ({}%)", filename, progress);
@@ -570,36 +688,11 @@ fn evaluate_visual_quality<R: tauri::Runtime>(
             progress,
         });
 
-        if let Ok(out) = output {
-            let stdout_str = String::from_utf8_lossy(&out.stdout);
-            let stderr_str = String::from_utf8_lossy(&out.stderr);
-            let merged = format!("{}\n{}", stdout_str, stderr_str);
-
-            let mut blur_val = None;
-            let mut block_val = None;
-
-            for line in merged.lines() {
-                if line.contains("lavfi.blur=") {
-                    if let Some(val_str) = line.split('=').nth(1) {
-                        if let Ok(val) = val_str.trim().parse::<f64>() {
-                            blur_val = Some(val);
-                        }
-                    }
-                }
-                if line.contains("lavfi.block=") {
-                    if let Some(val_str) = line.split('=').nth(1) {
-                        if let Ok(val) = val_str.trim().parse::<f64>() {
-                            block_val = Some(val);
-                        }
-                    }
-                }
-            }
-
-            if let (Some(bl), Some(bk)) = (blur_val, block_val) {
-                total_blur += bl;
-                total_block += bk;
-                count += 1;
-            }
+        // Run FFmpeg to parse blur and blocking artifacts for a single frame via media_engine
+        if let Ok(metrics) = crate::media_engine::run_ffmpeg_frame_metrics(file_path, timestamp) {
+            total_blur += metrics.blur;
+            total_block += metrics.block;
+            count += 1;
         }
     }
 

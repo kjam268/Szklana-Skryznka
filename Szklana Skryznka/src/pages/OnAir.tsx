@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useChannelStore, usePlayerStore, ScheduleEntryDetails } from "../store";
-import { Play, Pause, Volume2, Maximize2, Tv, Clock, Eye, AlertTriangle } from "lucide-react";
+import { Play, Volume2, Maximize2, Tv, Clock, Eye, AlertTriangle } from "lucide-react";
 
 export const OnAir: React.FC = () => {
   const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
-  const { volume, setVolume, isFullscreen, setFullscreen, isPlaying, setPlaying } = usePlayerStore();
+  const { volume, setVolume, setFullscreen, isPlaying, setPlaying } = usePlayerStore();
   
   const getPosterUrl = (path?: string) => {
     if (!path) return "";
@@ -80,6 +80,12 @@ export const OnAir: React.FC = () => {
       setPlaying(false);
     }
   }, [playoutState?.active_entry?.id]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = volume;
+    }
+  }, [volume]);
 
   const activeEntry = playoutState?.active_entry;
   const nextEntry = playoutState?.next_entry;
@@ -218,7 +224,6 @@ export const OnAir: React.FC = () => {
                 ref={videoRef}
                 src={convertFileSrc(activeEntry.file_path)}
                 className="w-full h-full object-contain"
-                volume={volume}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
                 onEnded={() => {

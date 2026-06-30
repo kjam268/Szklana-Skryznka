@@ -19,6 +19,29 @@ pub type DbState<'a> = State<'a, SqlitePool>;
 #[tauri::command]
 pub async fn scan_library(app: tauri::AppHandle, pool: DbState<'_>, path: String) -> Result<String, String> {
     info!("Tauri command scan_library invoked for path: {}", path);
+
+    // Save scanned path to SQLite settings
+    let existing_paths: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
+        .fetch_optional(&*pool)
+        .await
+        .unwrap_or(None);
+
+    let new_paths = match existing_paths {
+        Some(paths) => {
+            let mut list: Vec<String> = paths.split(',').map(|s| s.to_string()).collect();
+            if !list.contains(&path) {
+                list.push(path.clone());
+            }
+            list.join(",")
+        }
+        None => path.clone(),
+    };
+
+    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scanned_paths', $1)")
+        .bind(&new_paths)
+        .execute(&*pool)
+        .await;
+
     let res = scan_directory(&app, &pool, &path).await;
     
     // Ensure scan_in_progress is set to false on completion or error
@@ -1097,6 +1120,15 @@ pub async fn search_opensubtitles(pool: DbState<'_>, item_id: String) -> Result<
                 votes: Some(5),
                 file_id: 10001,
                 file_name: format!("{}.en.srt", item.title),
+            },
+            OpenSubtitlesResult {
+                id: "mock_sub_fr".to_string(),
+                language: "fr".to_string(),
+                release: format!("{}.1080p.BluRay.x264", clean_title.replace(' ', ".")),
+                download_count: 850,
+                votes: Some(5),
+                file_id: 10004,
+                file_name: format!("{}.fr.srt", item.title),
             },
             OpenSubtitlesResult {
                 id: "mock_sub_2".to_string(),

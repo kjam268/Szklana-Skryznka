@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { 
   Tv, Film, CalendarDays, Database, Activity, Lightbulb, 
-  ChevronLeft, ChevronRight, Settings
+  ChevronLeft, Settings
 } from "lucide-react";
 import { useLibraryStore, useScheduleStore, useChannelStore } from "../store";
 

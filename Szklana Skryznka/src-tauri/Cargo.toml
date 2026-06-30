@@ -32,5 +32,6 @@ md5 = "0.7.0"
 rfd = "0.15"
 reqwest = { version = "0.12", features = ["json"] }
 regex = "1"
+notify = "6.1.1"
 
 

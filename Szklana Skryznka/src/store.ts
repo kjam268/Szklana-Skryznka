@@ -37,6 +37,8 @@ export interface MediaFile {
   frame_rate?: number;
   audio_channels?: number;
   audio_language?: string;
+  audio_tracks?: string;
+  embedded_subtitles?: string;
 }
 
 export interface Subtitle {
@@ -360,3 +362,36 @@ export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
     }
   },
 }));
+
+// --- NOTIFICATION STORE (TOASTS) ---
+export interface Toast {
+  id: string;
+  message: string;
+  type: "info" | "success" | "error";
+}
+
+interface NotificationStore {
+  toasts: Toast[];
+  showToast: (message: string, type?: "info" | "success" | "error") => void;
+  dismissToast: (id: string) => void;
+}
+
+export const useNotificationStore = create<NotificationStore>((set) => ({
+  toasts: [],
+  showToast: (message, type = "info") => {
+    const id = Math.random().toString(36).substring(2, 9);
+    set((state) => ({
+      toasts: [...state.toasts, { id, message, type }],
+    }));
+    // Auto dismiss after 4 seconds
+    setTimeout(() => {
+      set((state) => ({
+        toasts: state.toasts.filter((t) => t.id !== id),
+      }));
+    }, 4000);
+  },
+  dismissToast: (id) => set((state) => ({
+    toasts: state.toasts.filter((t) => t.id !== id),
+  })),
+}));
+

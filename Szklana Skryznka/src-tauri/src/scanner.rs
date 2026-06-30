@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use sqlx::{SqlitePool, Row};
 use serde_json::Value;
 use tracing::{info, warn};
@@ -557,19 +556,27 @@ pub fn compute_fast_checksum(path: &Path) -> String {
     "".to_string()
 }
 
+pub struct ExtractedFileMetadata {
+    pub duration: i32,
+    pub resolution: String,
+    pub video_codec: String,
+    pub audio_codec: String,
+    pub video_bitrate: Option<i64>,
+    pub frame_rate: Option<f64>,
+    pub audio_channels: Option<i32>,
+    pub audio_language: Option<String>,
+    pub audio_tracks: Option<String>,
+    pub embedded_subtitles: Option<String>,
+    pub color_space: String,
+    pub color_transfer: String,
+    pub color_primaries: String,
+    pub video_profile: String,
+    pub video_level: i64,
+    pub audio_sample_rate: String,
+}
+
 /// Extract media metadata and perform video/audio telemetry analysis using ffprobe
-pub fn extract_metadata(path: &Path) -> (
-    i32,           // duration
-    String,        // resolution
-    String,        // video_codec
-    String,        // audio_codec
-    Option<i64>,   // video_bitrate
-    Option<f64>,   // frame_rate
-    Option<i32>,   // audio_channels
-    Option<String>, // audio_language
-    Option<String>, // audio_tracks
-    Option<String>  // embedded_subtitles
-) {
+pub fn extract_metadata(path: &Path) -> ExtractedFileMetadata {
     let mut duration = 300;
     let mut resolution = "1080p".to_string();
     let mut video_codec = "h264".to_string();
@@ -580,46 +587,19 @@ pub fn extract_metadata(path: &Path) -> (
     let mut audio_language = None;
     let mut audio_tracks = Vec::new();
     let mut embedded_subtitles = Vec::new();
+    let mut color_space = "unknown".to_string();
+    let mut color_transfer = "unknown".to_string();
+    let mut color_primaries = "unknown".to_string();
+    let mut video_profile = "unknown".to_string();
+    let mut video_level = 0;
+    let mut audio_sample_rate = "unknown".to_string();
 
     let path_str = path.to_string_lossy();
     
-    // Execute ffprobe with detailed stream tags
-    let mut output = Command::new("ffprobe")
-        .args([
-            "-v", "error",
-            "-show_entries", "format=duration,bit_rate",
-            "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags",
-            "-of", "json",
-            &path_str
-        ])
-        .output();
+    // Execute ffprobe via the media_engine module
+    let parsed_res = crate::media_engine::run_ffprobe_json(&path_str);
 
-    // If PATH execution failed or binary not found, try common macOS install directories
-    if output.is_err() || output.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
-        let alt_paths = ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"];
-        for p in alt_paths {
-            if let Ok(out) = Command::new(p)
-                .args([
-                    "-v", "error",
-                    "-show_entries", "format=duration,bit_rate",
-                    "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags",
-                    "-of", "json",
-                    &path_str
-                ])
-                .output()
-            {
-                if out.status.success() {
-                    output = Ok(out);
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            if let Ok(json_str) = String::from_utf8(out.stdout) {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&json_str) {
+    if let Ok(parsed) = parsed_res {
                     // Extract duration
                     if let Some(duration_str) = parsed["format"]["duration"].as_str() {
                         if let Ok(dur_f) = duration_str.parse::<f64>() {
@@ -650,11 +630,18 @@ pub fn extract_metadata(path: &Path) -> (
                                 if let Some(fr_str) = stream["r_frame_rate"].as_str() {
                                     frame_rate = parse_frame_rate(fr_str);
                                 }
+
+                                color_space = stream["color_space"].as_str().unwrap_or("unknown").to_string();
+                                color_transfer = stream["color_transfer"].as_str().unwrap_or("unknown").to_string();
+                                color_primaries = stream["color_primaries"].as_str().unwrap_or("unknown").to_string();
+                                video_profile = stream["profile"].as_str().unwrap_or("unknown").to_string();
+                                video_level = stream["level"].as_i64().unwrap_or(0);
                             } else if codec_type == "audio" {
                                 audio_codec = codec_name.to_string();
                                 audio_channels = stream["channels"].as_i64().map(|c| c as i32);
                                 let lang = stream["tags"]["language"].as_str().unwrap_or("und");
                                 audio_language = Some(lang.to_string());
+                                audio_sample_rate = stream["sample_rate"].as_str().unwrap_or("unknown").to_string();
                                 
                                 let track_desc = format!("{} ({}ch)", lang, stream["channels"].as_i64().unwrap_or(2));
                                 audio_tracks.push(track_desc);
@@ -677,9 +664,6 @@ pub fn extract_metadata(path: &Path) -> (
                             }
                         }
                     }
-                }
-            }
-        }
     } else {
         // Fallback: heuristic based on file size and filename tags if ffprobe is completely missing or empty
         if let Ok(meta) = fs::metadata(path) {
@@ -734,7 +718,7 @@ pub fn extract_metadata(path: &Path) -> (
     let audio_tracks_str = if audio_tracks.is_empty() { None } else { Some(audio_tracks.join(", ")) };
     let embedded_subs_str = if embedded_subtitles.is_empty() { None } else { Some(embedded_subtitles.join(", ")) };
 
-    (
+    ExtractedFileMetadata {
         duration,
         resolution,
         video_codec,
@@ -743,9 +727,15 @@ pub fn extract_metadata(path: &Path) -> (
         frame_rate,
         audio_channels,
         audio_language,
-        audio_tracks_str,
-        embedded_subs_str
-    )
+        audio_tracks: audio_tracks_str,
+        embedded_subtitles: embedded_subs_str,
+        color_space,
+        color_transfer,
+        color_primaries,
+        video_profile,
+        video_level,
+        audio_sample_rate,
+    }
 }
 
 fn clean_filename(filename: &str) -> (String, Option<i32>) {
@@ -911,6 +901,15 @@ pub fn calculate_quality_score(
     audio_channels: Option<i32>,
     video_codec: &str,
     audio_codec: &str,
+    frame_rate: Option<f64>,
+    color_space: &str,
+    color_transfer: &str,
+    color_primaries: &str,
+    video_profile: &str,
+    video_level: i64,
+    audio_sample_rate: &str,
+    vmaf_score: Option<f64>,
+    ebur128_loudness: Option<f64>,
 ) -> f64 {
     let mut score = 0;
 
@@ -926,45 +925,109 @@ pub fn calculate_quality_score(
     };
 
     if height >= 2160 {
-        score += 500; // 4K
+        score += 400; // 4K
     } else if height >= 1080 {
-        score += 200; // 1080p
+        score += 300; // 1080p
     } else if height >= 720 {
-        score += 100; // 720p
+        score += 200; // 720p
+    } else {
+        score += 100; // Standard definition baseline
     }
 
-    // 2. Bitrate (Mbps)
+    // 2. Bitrate (progressive scaling)
     if let Some(bitrate_bps) = video_bitrate {
         let mbps = (bitrate_bps as f64) / 1_000_000.0;
-        score += (mbps * 10.0) as i32;
+        let bitrate_points = (mbps * 15.0) as i32;
+        score += bitrate_points.min(300); // capped at 300 points
     }
 
     // 3. Video Codec Efficiency
     let v_codec = video_codec.to_uppercase();
     if v_codec.contains("HEVC") || v_codec.contains("H265") || v_codec.contains("AV1") {
-        score += 50;
+        score += 100;
+    } else if v_codec.contains("H264") || v_codec.contains("AVC") {
+        score += 60;
+    } else {
+        score += 30;
     }
 
-    // 4. HDR Feature
-    if v_codec.contains("10BIT") || v_codec.contains("HDR") {
-        score += 50;
+    // 4. HDR / Color Telemetry Features
+    let color_space_lower = color_space.to_lowercase();
+    let color_transfer_lower = color_transfer.to_lowercase();
+    let color_primaries_lower = color_primaries.to_lowercase();
+    if color_space_lower.contains("bt2020")
+        || color_transfer_lower.contains("smpte2084")
+        || color_transfer_lower.contains("arib-std-b67")
+        || color_primaries_lower.contains("bt2020")
+        || v_codec.contains("10BIT")
+        || v_codec.contains("HDR")
+    {
+        score += 50; // HDR / BT2020 bonus
     }
 
-    // 5. Audio Channels
-    let channels = audio_channels.unwrap_or(0);
+    // 5. Video Codec Profile & Level
+    let profile_lower = video_profile.to_lowercase();
+    if profile_lower.contains("main 10") || profile_lower.contains("high 10") || profile_lower.contains("main10") {
+        score += 30; // 10-bit profile bonus
+    } else if profile_lower.contains("high") || profile_lower.contains("main") {
+        score += 15; // standard profile bonus
+    }
+
+    if video_level >= 41 {
+        score += 10; // high level (e.g. H264 level 4.1+ / HEVC level 5.0+)
+    }
+
+    // 6. Audio Channels
+    let channels = audio_channels.unwrap_or(2);
     if channels >= 8 {
-        score += 150; // 7.1
+        score += 100; // 7.1
     } else if channels >= 6 {
         score += 100; // 5.1
+    } else if channels >= 2 {
+        score += 60;  // Stereo
+    } else if channels >= 1 {
+        score += 30;  // Mono
     }
 
-    // 6. Audio Codec Quality
+    // 7. Audio Codec Quality
     let a_codec = audio_codec.to_uppercase();
     if a_codec.contains("DTS") || a_codec.contains("TRUEHD") || a_codec.contains("ATMOS") {
         score += 50;
+    } else if a_codec.contains("AAC") || a_codec.contains("AC3") || a_codec.contains("MP3") {
+        score += 30;
+    } else {
+        score += 10;
     }
 
+    // 8. Audio Sample Rate
+    if let Ok(rate_hz) = audio_sample_rate.parse::<i32>() {
+        if rate_hz >= 96000 {
+            score += 25;
+        } else if rate_hz >= 48000 {
+            score += 15;
+        }
+    }
+
+    // 9. Frame Rate Bonus
+    if let Some(fps) = frame_rate {
+        if fps >= 50.0 {
+            score += 10;
+        }
+    }
+
+    // 10. EBU R128 loudness correction
+    if let Some(loudness) = ebur128_loudness {
+        if loudness >= -30.0 && loudness <= -12.0 {
+            score += 20;
+        }
+    }
+
+    // 11. VMAF Perceptual Quality Score integration
     let mut final_score = (score as f64) / 10.0;
+    if let Some(vmaf) = vmaf_score {
+        final_score = (vmaf * 0.7) + (final_score * 0.3);
+    }
+
     if final_score > 100.0 {
         final_score = 100.0;
     }
@@ -1123,7 +1186,65 @@ pub async fn run_second_layer_deduplication(pool: &SqlitePool) -> Result<(), Box
         }
     }
 
-    // 4. Run standard deduplicate pass
+    // 4. Group duplicates by title similarity (word subset / sub-phrase check) and year
+    let all_items: Vec<(String, String, Option<i32>)> = sqlx::query(
+        "SELECT id, title, year FROM media_items"
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| {
+        let id: String = r.get("id");
+        let title: String = r.get("title");
+        let year: Option<i32> = r.get("year");
+        (id, title, year)
+    })
+    .collect();
+
+    let mut merged_ids = std::collections::HashSet::new();
+
+    for i in 0..all_items.len() {
+        let (id_a, title_a, year_a) = &all_items[i];
+        if merged_ids.contains(id_a) {
+            continue;
+        }
+
+        let clean_a = title_a.to_lowercase().replace('\'', "").replace(':', "").replace('.', "").replace('-', " ");
+        let words_a: Vec<&str> = clean_a.split_whitespace().collect();
+
+        for j in (i + 1)..all_items.len() {
+            let (id_b, title_b, year_b) = &all_items[j];
+            if merged_ids.contains(id_b) {
+                continue;
+            }
+
+            // Years must match, or at least one must be None
+            if let (Some(y_a), Some(y_b)) = (year_a, year_b) {
+                if y_a != y_b {
+                    continue;
+                }
+            }
+
+            let clean_b = title_b.to_lowercase().replace('\'', "").replace(':', "").replace('.', "").replace('-', " ");
+            let words_b: Vec<&str> = clean_b.split_whitespace().collect();
+
+            // Check if one title is a sub-phrase/word-subset of the other
+            let is_match = if words_a.len() > words_b.len() {
+                clean_a.contains(&clean_b) || (!words_b.is_empty() && words_b.iter().all(|w| words_a.contains(w)))
+            } else {
+                clean_b.contains(&clean_a) || (!words_a.is_empty() && words_a.iter().all(|w| words_b.contains(w)))
+            };
+
+            if is_match {
+                info!("Title Similarity Deduplication: Merging {} and {}", title_a, title_b);
+                if let Ok(_) = merge_duplicate_item_ids(pool, vec![id_a.clone(), id_b.clone()]).await {
+                    merged_ids.insert(id_b.clone());
+                }
+            }
+        }
+    }
+
+    // 5. Run standard deduplicate pass
     let _ = deduplicate_database(pool).await?;
 
     Ok(())

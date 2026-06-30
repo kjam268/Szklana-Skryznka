@@ -45,6 +45,14 @@ pub async fn init_db(app_handle: &tauri::AppHandle) -> Result<SqlitePool, Box<dy
     // Schema updates: Ensure audio_tracks and embedded_subtitles are present in media_files
     let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN audio_tracks TEXT;").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN embedded_subtitles TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_space TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_transfer TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_primaries TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN video_profile TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN video_level INTEGER;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN audio_sample_rate TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN ebur128_loudness REAL;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN vmaf_score REAL;").execute(&pool).await;
     
     // Schema updates: Ensure rt_score, imdb_score and imdb_id are present in media_items
     let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN rt_score TEXT;").execute(&pool).await;

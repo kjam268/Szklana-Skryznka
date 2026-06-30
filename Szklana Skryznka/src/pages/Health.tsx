@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { useDiagnosticsStore, useLibraryStore } from "../store";
-import { Activity, ShieldAlert, CheckCircle, RefreshCw, AlertTriangle, FileWarning, Copy } from "lucide-react";
+import { Activity, RefreshCw, FileWarning, Copy } from "lucide-react";
 
 export const Health: React.FC = () => {
   const { report, isLoading, fetchReport } = useDiagnosticsStore();
