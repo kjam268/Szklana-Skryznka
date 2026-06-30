@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useLibraryStore, MediaItemDetails, useNotificationStore } from "../store";
-import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown } from "lucide-react";
+import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -51,6 +51,7 @@ export const Library: React.FC = () => {
   const [editRtScore, setEditRtScore] = useState("");
   const [editImdbScore, setEditImdbScore] = useState("");
   const [sortBy, setSortBy] = useState("alphabetical");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [manualSearchQuery, setManualSearchQuery] = useState("");
   const [osResults, setOsResults] = useState<any[]>([]);
   const [isSearchingOs, setIsSearchingOs] = useState(false);
@@ -98,6 +99,19 @@ export const Library: React.FC = () => {
       }
     };
   }, [fetchItems]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSelectedItem(null);
+        setIsConfirmingDelete(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     if (selectedItem) {
@@ -298,34 +312,37 @@ export const Library: React.FC = () => {
   });
 
   const sortedFilteredItems = [...filteredItems].sort((a, b) => {
+    const numOrder = sortDirection === "desc" ? 1 : -1;
+    const alphaOrder = sortDirection === "asc" ? 1 : -1;
+
     if (sortBy === "alphabetical") {
-      return a.item.title.localeCompare(b.item.title);
+      return a.item.title.localeCompare(b.item.title) * alphaOrder;
     }
     if (sortBy === "quality_score") {
       const qA = a.files?.[0]?.quality_score ?? 0;
       const qB = b.files?.[0]?.quality_score ?? 0;
-      return qB - qA;
+      return (qB - qA) * numOrder;
     }
     if (sortBy === "imdb_score") {
       const imdbA = parseFloat(a.item.imdb_score || "0");
       const imdbB = parseFloat(b.item.imdb_score || "0");
-      return imdbB - imdbA;
+      return (imdbB - imdbA) * numOrder;
     }
     if (sortBy === "rotten_tomatoes") {
       const rtA = parseInt(a.item.rt_score?.replace("%", "") || "0");
       const rtB = parseInt(b.item.rt_score?.replace("%", "") || "0");
-      return rtB - rtA;
+      return (rtB - rtA) * numOrder;
     }
     if (sortBy === "duration") {
       const durA = a.item.runtime ?? 0;
       const durB = b.item.runtime ?? 0;
-      return durB - durA;
+      return (durB - durA) * numOrder;
     }
     if (sortBy === "release_date") {
       const yA = a.item.year ?? 0;
       const yB = b.item.year ?? 0;
-      if (yA !== yB) return yB - yA;
-      return a.item.title.localeCompare(b.item.title);
+      if (yA !== yB) return (yB - yA) * numOrder;
+      return a.item.title.localeCompare(b.item.title) * alphaOrder;
     }
     return 0;
   });
@@ -407,6 +424,15 @@ export const Library: React.FC = () => {
                 <option value="release_date" className="bg-gray-950 text-gray-200">Release Date</option>
               </select>
             </div>
+
+            {/* Sort Direction Toggle */}
+            <button
+              onClick={() => setSortDirection(prev => prev === "asc" ? "desc" : "asc")}
+              className="bg-gray-900 border border-gray-800 rounded-lg p-2.5 hover:border-accent hover:text-accent transition-colors flex items-center justify-center shrink-0 focus:outline-none text-gray-400"
+              title={sortDirection === "asc" ? "Sort Ascending" : "Sort Descending"}
+            >
+              {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+            </button>
           </div>
           <div className="flex space-x-1.5 overflow-x-auto w-full scrollbar-none">
               {libraryTabs.map((tab) => {
@@ -605,13 +631,13 @@ export const Library: React.FC = () => {
                               {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
                               <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
                                 {details.item.imdb_score && (
-                                  <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[17px]">
+                                  <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[9.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[20px]">
                                     IMDb {details.item.imdb_score}
                                   </span>
                                 )}
                                 {details.item.rt_score && (
-                                  <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[17px]">
-                                    <span className="text-[9px] leading-none">🍅</span>
+                                  <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[9.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[20px]">
+                                    <span className="text-[11px] leading-none">🍅</span>
                                     <span className="leading-none">{details.item.rt_score}</span>
                                   </span>
                                 )}
@@ -795,31 +821,33 @@ export const Library: React.FC = () => {
               });
 
               const showNames = Object.keys(groupedShows).sort((a, b) => {
+                const numOrder = sortDirection === "desc" ? 1 : -1;
+                const alphaOrder = sortDirection === "asc" ? 1 : -1;
                 const groupA = groupedShows[a];
                 const groupB = groupedShows[b];
                 
                 if (sortBy === "alphabetical") {
-                  return a.localeCompare(b);
+                  return a.localeCompare(b) * alphaOrder;
                 }
                 if (sortBy === "quality_score") {
                   const getAvgQ = (g: any[]) => g.reduce((sum, item) => sum + (item.files?.[0]?.quality_score ?? 0), 0) / g.length;
-                  return getAvgQ(groupB) - getAvgQ(groupA);
+                  return (getAvgQ(groupB) - getAvgQ(groupA)) * numOrder;
                 }
                 if (sortBy === "imdb_score") {
                   const getAvgIMDb = (g: any[]) => g.reduce((sum, item) => sum + parseFloat(item.item.imdb_score || "0"), 0) / g.length;
-                  return getAvgIMDb(groupB) - getAvgIMDb(groupA);
+                  return (getAvgIMDb(groupB) - getAvgIMDb(groupA)) * numOrder;
                 }
                 if (sortBy === "rotten_tomatoes") {
                   const getAvgRT = (g: any[]) => g.reduce((sum, item) => sum + parseInt(item.item.rt_score?.replace("%", "") || "0"), 0) / g.length;
-                  return getAvgRT(groupB) - getAvgRT(groupA);
+                  return (getAvgRT(groupB) - getAvgRT(groupA)) * numOrder;
                 }
                 if (sortBy === "duration") {
                   const getAvgDur = (g: any[]) => g.reduce((sum, item) => sum + (item.item.runtime ?? 0), 0) / g.length;
-                  return getAvgDur(groupB) - getAvgDur(groupA);
+                  return (getAvgDur(groupB) - getAvgDur(groupA)) * numOrder;
                 }
                 if (sortBy === "release_date") {
                   const getNewestYear = (g: any[]) => Math.max(...g.map(item => item.item.year ?? 0));
-                  return getNewestYear(groupB) - getNewestYear(groupA);
+                  return (getNewestYear(groupB) - getNewestYear(groupA)) * numOrder;
                 }
                 return 0;
               });
@@ -967,6 +995,9 @@ export const Library: React.FC = () => {
 
               // Sort the final mixed renderList using the chosen sortBy
               const sortedRenderList = [...renderList].sort((a, b) => {
+                const numOrder = sortDirection === "desc" ? 1 : -1;
+                const alphaOrder = sortDirection === "asc" ? 1 : -1;
+
                 const getQuality = (x: any) => {
                   if ('isShowFolder' in x) {
                     const scores = x.episodes.map((e: any) => e.files?.[0]?.quality_score).filter((s: any) => s !== undefined && s !== null);
@@ -1015,25 +1046,25 @@ export const Library: React.FC = () => {
                 };
 
                 if (sortBy === "alphabetical") {
-                  return getTitleStr(a).localeCompare(getTitleStr(b));
+                  return getTitleStr(a).localeCompare(getTitleStr(b)) * alphaOrder;
                 }
                 if (sortBy === "quality_score") {
-                  return getQuality(b) - getQuality(a);
+                  return (getQuality(b) - getQuality(a)) * numOrder;
                 }
                 if (sortBy === "imdb_score") {
-                  return getIMDb(b) - getIMDb(a);
+                  return (getIMDb(b) - getIMDb(a)) * numOrder;
                 }
                 if (sortBy === "rotten_tomatoes") {
-                  return getRT(b) - getRT(a);
+                  return (getRT(b) - getRT(a)) * numOrder;
                 }
                 if (sortBy === "duration") {
-                  return getDur(b) - getDur(a);
+                  return (getDur(b) - getDur(a)) * numOrder;
                 }
                 if (sortBy === "release_date") {
                   if (getYear(b) !== getYear(a)) {
-                    return getYear(b) - getYear(a);
+                    return (getYear(b) - getYear(a)) * numOrder;
                   }
-                  return getTitleStr(a).localeCompare(getTitleStr(b));
+                  return getTitleStr(a).localeCompare(getTitleStr(b)) * alphaOrder;
                 }
                 return 0;
               });
@@ -1249,13 +1280,13 @@ export const Library: React.FC = () => {
                           {/* Rating Badges Overlay (Top Right, stacked vertically below the Star button) */}
                           <div className="absolute top-8 right-2 flex flex-col space-y-1 items-end z-20">
                             {details.item.imdb_score && (
-                              <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[17px]">
+                              <span className="bg-black/80 backdrop-blur-sm border border-yellow-500/30 text-yellow-400 font-extrabold px-1.5 rounded text-[9.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center h-[20px]">
                                 IMDb {details.item.imdb_score}
                               </span>
                             )}
                             {details.item.rt_score && (
-                              <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[8px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[17px]">
-                                <span className="text-[9px] leading-none">🍅</span>
+                              <span className="bg-black/80 backdrop-blur-sm border border-red-500/30 text-red-400 font-extrabold px-1.5 rounded text-[9.5px] font-sans tracking-tight shrink-0 shadow-lg flex items-center justify-center space-x-0.5 h-[20px]">
+                                <span className="text-[11px] leading-none">🍅</span>
                                 <span className="leading-none">{details.item.rt_score}</span>
                               </span>
                             )}
@@ -1331,9 +1362,9 @@ export const Library: React.FC = () => {
 
               {/* Poster Preview & Edit Option */}
               <div className="relative group rounded-lg overflow-hidden border border-gray-800 bg-gray-950 aspect-[2/3] max-w-[140px] mx-auto flex items-center justify-center shadow-lg">
-                {selectedItem.item.poster_path ? (
+                {editPoster ? (
                   <img
-                    src={getPosterUrl(selectedItem.item.poster_path)}
+                    src={getPosterUrl(editPoster)}
                     alt="Poster Preview"
                     className="w-full h-full object-cover"
                   />
@@ -1677,57 +1708,63 @@ export const Library: React.FC = () => {
                 <span>{isRefreshing ? "REFRESHING..." : "REFRESH FROM ONLINE"}</span>
               </button>
 
-              {isConfirmingDelete ? (
-                <div className="bg-rose-950/20 border border-rose-900/60 rounded-lg p-3 space-y-3">
-                  <div className="text-xs text-rose-300 font-medium leading-relaxed">
-                    Are you sure you want to delete this media item permanently from the library?
-                  </div>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => setIsConfirmingDelete(false)}
-                      className="flex-1 bg-gray-800 text-gray-200 text-xs py-1.5 rounded hover:bg-gray-700 transition-colors font-semibold"
-                    >
-                      CANCEL
-                    </button>
-                    <button
-                      onClick={async () => {
-                        try {
-                          await deleteItem(selectedItem.item.id);
-                          setSelectedItem(null);
-                          setIsConfirmingDelete(false);
-                          showToast("Media item deleted from library", "success");
-                        } catch (err) {
-                          console.error("Failed to delete item:", err);
-                          showToast("Failed to delete item", "error");
-                        }
-                      }}
-                      className="flex-1 bg-rose-600 text-white text-xs py-1.5 rounded hover:bg-rose-500 transition-colors font-semibold"
-                    >
-                      DELETE
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex space-x-3">
-                  <button
-                    onClick={handleSaveMetadata}
-                    className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors focus:outline-none"
-                  >
-                    SAVE CHANGES
-                  </button>
-                  <button
-                    onClick={() => setIsConfirmingDelete(true)}
-                    className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors focus:outline-none"
-                    title="Delete item from library"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              )}
+              <div className="flex space-x-3">
+                <button
+                  onClick={handleSaveMetadata}
+                  className="flex-1 bg-accent text-background font-bold text-xs py-2 rounded-lg hover:bg-cyan-400 transition-colors focus:outline-none"
+                >
+                  SAVE CHANGES
+                </button>
+                <button
+                  onClick={() => setIsConfirmingDelete(true)}
+                  className="bg-rose-950/20 border border-rose-800 text-rose-500 p-2 rounded-lg hover:bg-rose-600 hover:text-white transition-colors focus:outline-none"
+                  title="Delete item from library"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
             </div>
           </div>
         )}
       </div>
+
+      {isConfirmingDelete && selectedItem && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-panel border border-rose-950/60 rounded-xl max-w-sm w-full p-6 shadow-2xl space-y-4">
+            <div className="text-sm font-bold text-rose-500 flex items-center space-x-2">
+              <Trash2 size={16} />
+              <span>DELETE MEDIA ITEM?</span>
+            </div>
+            <p className="text-xs text-gray-300 leading-relaxed font-sans">
+              Are you sure you want to delete <span className="font-semibold text-white">{selectedItem.item.title}</span> permanently from your library? This action cannot be undone.
+            </p>
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                onClick={() => setIsConfirmingDelete(false)}
+                className="px-3 py-1.5 bg-gray-800 text-gray-200 text-[10px] rounded hover:bg-gray-700 transition-colors font-bold tracking-wider uppercase"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await deleteItem(selectedItem.item.id);
+                    setSelectedItem(null);
+                    setIsConfirmingDelete(false);
+                    showToast("Media item deleted from library", "success");
+                  } catch (err) {
+                    console.error("Failed to delete item:", err);
+                    showToast("Failed to delete item", "error");
+                  }
+                }}
+                className="px-3 py-1.5 bg-rose-600 text-white text-[10px] rounded hover:bg-rose-500 transition-colors font-bold tracking-wider uppercase"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
