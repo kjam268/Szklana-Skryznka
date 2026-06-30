@@ -837,7 +837,7 @@ pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::
 }
 
 #[tauri::command]
-pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_override: Option<String>) -> Result<String, String> {
+pub async fn refresh_item_metadata(app: tauri::AppHandle, pool: DbState<'_>, item_id: String, search_override: Option<String>) -> Result<String, String> {
     // 1. Fetch item title, year, and media_type from database
     let item: crate::models::MediaItem = sqlx::query_as::<_, crate::models::MediaItem>(
         "SELECT * FROM media_items WHERE id = $1"
@@ -847,9 +847,16 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
     .await
     .map_err(|e| format!("Failed to find media item: {}", e))?;
 
-    // 2. Fetch TMDb API Key from settings
+    // 2. Fetch TMDb and OMDb API Keys from settings
     let api_key: Option<String> = sqlx::query_scalar(
         "SELECT value FROM settings WHERE key = 'tmdb_api_key'"
+    )
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None);
+
+    let omdb_key: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'omdb_api_key'"
     )
     .fetch_optional(&*pool)
     .await
@@ -861,7 +868,7 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
         _ => item.title.clone(),
     };
     let query_year = if search_override.is_some() { None } else { item.year };
-    let mut online = crate::scanner::fetch_online_metadata(&query_title, query_year, &item.media_type, api_key.clone()).await;
+    let mut online = crate::scanner::fetch_online_metadata(&query_title, query_year, &item.media_type, api_key.clone(), omdb_key.clone()).await;
 
     // Fallback logic from scanner
     if online.poster_path.is_none() && item.media_type == "Movie" {
@@ -890,7 +897,13 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
     }
 
     // 4. Update MediaItem in database
-    // 4. Update MediaItem in database
+    let local_poster_path = if let Some(ref path_str) = online.poster_path {
+        crate::scanner::download_poster_locally(&app, path_str).await
+    } else {
+        None
+    };
+    let final_poster = local_poster_path.clone().or(online.poster_path.clone());
+
     if let Some(online_rt) = online.runtime {
         sqlx::query(
             "UPDATE media_items SET original_title = $1, synopsis = $2, rating = $3, poster_path = $4, backdrop_path = $5, runtime = $6, updated_at = $7, rt_score = $8, imdb_score = $9 \
@@ -899,7 +912,7 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
         .bind(&item.title)
         .bind(&online.synopsis)
         .bind(online.rating)
-        .bind(&online.poster_path)
+        .bind(&final_poster)
         .bind(&online.backdrop_path)
         .bind(online_rt)
         .bind(chrono::Utc::now().to_rfc3339())
@@ -917,7 +930,7 @@ pub async fn refresh_item_metadata(pool: DbState<'_>, item_id: String, search_ov
         .bind(&item.title)
         .bind(&online.synopsis)
         .bind(online.rating)
-        .bind(&online.poster_path)
+        .bind(&final_poster)
         .bind(&online.backdrop_path)
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(&online.rt_score)

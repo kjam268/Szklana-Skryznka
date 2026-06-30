@@ -40,8 +40,10 @@ pub fn run() {
 
             let status_item = MenuItem::with_id(&handle, "status", "Szklana Skryznka: Idle", false, None::<&str>).unwrap();
             let progress_item = MenuItem::with_id(&handle, "progress", "", false, None::<&str>).unwrap();
+            let watched_path_item = MenuItem::with_id(&handle, "watched_path", "Watched: None", false, None::<&str>).unwrap();
             let tmdb_status_item = MenuItem::with_id(&handle, "tmdb_status", "TMDb: Checking...", false, None::<&str>).unwrap();
             let anilist_status_item = MenuItem::with_id(&handle, "anilist_status", "AniList: Checking...", false, None::<&str>).unwrap();
+            let omdb_status_item = MenuItem::with_id(&handle, "omdb_status", "OMDb: Checking...", false, None::<&str>).unwrap();
 
             let pause_scans_item = CheckMenuItem::with_id(&handle, "pause_scans", "Pause Background Scans", true, false, None::<&str>).unwrap();
 
@@ -56,9 +58,11 @@ pub fn run() {
             let tray_menu = Menu::with_items(&handle, &[
                 &status_item,
                 &progress_item,
+                &watched_path_item,
                 &tauri::menu::PredefinedMenuItem::separator(&handle).unwrap(),
                 &tmdb_status_item,
                 &anilist_status_item,
+                &omdb_status_item,
                 &pause_scans_item,
                 &history_submenu,
                 &tauri::menu::PredefinedMenuItem::separator(&handle).unwrap(),
@@ -170,6 +174,7 @@ pub fn run() {
                 // Spawn filesystem folder watcher thread (Critic D)
                 let watcher_pool = pool.clone();
                 let watcher_handle = handle.clone();
+                let watched_path_item_watcher = watched_path_item.clone();
                 tauri::async_runtime::spawn(async move {
                     use notify::{Watcher, RecursiveMode, EventKind};
                     use std::collections::HashSet;
@@ -194,7 +199,15 @@ pub fn run() {
                             .await
                             .unwrap_or(None);
 
-                        if let Some(paths_str) = scanned_paths_str {
+                        if let Some(ref paths_str) = scanned_paths_str {
+                            // Update watched path item text in tray dynamically
+                            let cleaned_paths = if paths_str.trim().is_empty() {
+                                "Watched: None".to_string()
+                            } else {
+                                format!("Watched: {}", paths_str)
+                            };
+                            let _ = watched_path_item_watcher.set_text(cleaned_paths);
+
                             let current_paths: HashSet<String> = paths_str.split(',')
                                 .map(|s| s.to_string())
                                 .filter(|s| !s.trim().is_empty())
@@ -297,6 +310,7 @@ pub fn run() {
                 let progress_item_clone = progress_item.clone();
                 let tmdb_status_item_clone = tmdb_status_item.clone();
                 let anilist_status_item_clone = anilist_status_item.clone();
+                let omdb_status_item_clone = omdb_status_item.clone();
                 let pause_scans_item_clone = pause_scans_item.clone();
                 let recent_1_clone = recent_1.clone();
                 let recent_2_clone = recent_2.clone();
@@ -315,6 +329,10 @@ pub fn run() {
                             .fetch_optional(&worker_pool)
                             .await
                             .unwrap_or(None);
+                        let omdb_key: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'omdb_api_key'")
+                            .fetch_optional(&worker_pool)
+                            .await
+                            .unwrap_or(None);
 
                         let tmdb_status = if tmdb_key.is_some() && !tmdb_key.unwrap().trim().is_empty() {
                             "TMDb: Connected ✓"
@@ -326,9 +344,15 @@ pub fn run() {
                         } else {
                             "AniList: Not Configured ✗"
                         };
+                        let omdb_status = if omdb_key.is_some() && !omdb_key.unwrap().trim().is_empty() {
+                            "OMDb: Connected ✓"
+                        } else {
+                            "OMDb: Not Configured ✗"
+                        };
 
                         let _ = tmdb_status_item_clone.set_text(tmdb_status);
                         let _ = anilist_status_item_clone.set_text(anilist_status);
+                        let _ = omdb_status_item_clone.set_text(omdb_status);
 
                         // Check if low resource mode/pause is enabled
                         let pause_scans: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'pause_background_scans'")
@@ -517,13 +541,18 @@ pub fn run() {
                                             None => metadata_score,
                                         };
 
+                                        // Calculate real content checksum in the background
+                                        let path_buf = std::path::Path::new(&file_path);
+                                        let real_checksum = scanner::calculate_real_checksum(&path_buf).unwrap_or_else(|_| "".to_string());
+
                                         // Write final score and set quality_score_done = 1
                                         let _ = sqlx::query(
-                                            "UPDATE media_files SET quality_score = $1, quality_score_done = 1, ebur128_loudness = $2, vmaf_score = $3 WHERE id = $4"
+                                            "UPDATE media_files SET quality_score = $1, quality_score_done = 1, ebur128_loudness = $2, vmaf_score = $3, checksum = $4 WHERE id = $5"
                                         )
                                         .bind(score)
                                         .bind(loudness)
                                         .bind(vmaf_score)
+                                        .bind(&real_checksum)
                                         .bind(&id)
                                         .execute(&worker_pool)
                                         .await;

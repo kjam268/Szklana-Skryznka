@@ -39,6 +39,14 @@ export interface MediaFile {
   audio_language?: string;
   audio_tracks?: string;
   embedded_subtitles?: string;
+  color_space?: string;
+  color_transfer?: string;
+  color_primaries?: string;
+  video_profile?: string;
+  video_level?: number;
+  audio_sample_rate?: string;
+  ebur128_loudness?: number;
+  vmaf_score?: number;
 }
 
 export interface Subtitle {

@@ -17,9 +17,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const [tempKey, setTempKey] = useState("");
   const [tempAnilistKey, setTempAnilistKey] = useState("");
   const [tempOpensubtitlesKey, setTempOpensubtitlesKey] = useState("");
+  const [tempOmdbKey, setTempOmdbKey] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [tmdbStatus, setTmdbStatus] = useState<"checking" | "connected" | "disconnected" | "none">("checking");
+  const [omdbStatus, setOmdbStatus] = useState<"checking" | "connected" | "disconnected" | "none">("checking");
 
   const [purgeTarget, setPurgeTarget] = useState<"library" | "schedule" | "all_keep_settings" | "all">("library");
   const [purgePassword, setPurgePassword] = useState("");
@@ -80,8 +82,35 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     }
   };
 
+  const checkOmdbConnection = async () => {
+    setOmdbStatus("checking");
+    try {
+      const key = await invoke<string | null>("get_setting", { key: "omdb_api_key" });
+      if (!key || key.trim() === "") {
+        setOmdbStatus("none");
+        return;
+      }
+      const key_trimmed = key.trim();
+      const res = await fetch(`https://www.omdbapi.com/?apikey=${key_trimmed}&t=Inception`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.Response === "True") {
+          setOmdbStatus("connected");
+        } else {
+          setOmdbStatus("disconnected");
+        }
+      } else {
+        setOmdbStatus("disconnected");
+      }
+    } catch (e) {
+      console.error(e);
+      setOmdbStatus("disconnected");
+    }
+  };
+
   useEffect(() => {
     checkConnection();
+    checkOmdbConnection();
   }, [showKeyModal]);
 
   const menuItems = [
@@ -101,6 +130,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       setTempAnilistKey(existingAnilistKey || "");
       const existingOpensubtitlesKey = await invoke<string | null>("get_setting", { key: "opensubtitles_api_key" });
       setTempOpensubtitlesKey(existingOpensubtitlesKey || "");
+      const existingOmdbKey = await invoke<string | null>("get_setting", { key: "omdb_api_key" });
+      setTempOmdbKey(existingOmdbKey || "");
     } catch (e) {
       console.error("Failed to load settings:", e);
     }
@@ -114,10 +145,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       const key_trimmed = tempKey.trim();
       const anilist_trimmed = tempAnilistKey.trim();
       const opensubtitles_trimmed = tempOpensubtitlesKey.trim();
+      const omdb_trimmed = tempOmdbKey.trim();
       await invoke("set_setting", { key: "tmdb_api_key", value: key_trimmed });
       await invoke("set_setting", { key: "anilist_api_key", value: anilist_trimmed });
       await invoke("set_setting", { key: "opensubtitles_api_key", value: opensubtitles_trimmed });
+      await invoke("set_setting", { key: "omdb_api_key", value: omdb_trimmed });
       setTmdbStatus("checking");
+      setOmdbStatus("checking");
       
       if (key_trimmed === "") {
         setTmdbStatus("none");
@@ -138,6 +172,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         } else {
           setTmdbStatus("disconnected");
           setSaveMessage("Settings saved, but TMDb failed (invalid API key).");
+        }
+      }
+
+      if (omdb_trimmed === "") {
+        setOmdbStatus("none");
+      } else {
+        const res = await fetch(`https://www.omdbapi.com/?apikey=${omdb_trimmed}&t=Inception`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.Response === "True") {
+            setOmdbStatus("connected");
+          } else {
+            setOmdbStatus("disconnected");
+          }
+        } else {
+          setOmdbStatus("disconnected");
         }
       }
     } catch (e) {
@@ -388,6 +438,25 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                             placeholder="Enter OpenSubtitles API Key..."
                             value={tempOpensubtitlesKey}
                             onChange={(e) => setTempOpensubtitlesKey(e.target.value)}
+                            disabled={isSaving}
+                            className="w-full bg-gray-950 border border-gray-855 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-accent text-accent font-bold font-mono placeholder-gray-700 disabled:opacity-50"
+                          />
+                        </div>
+                      </div>
+
+                      {/* OMDB Section */}
+                      <div className="space-y-2">
+                        <span className="text-[10px] text-accent font-bold tracking-wider block">OMDb API Connection</span>
+                        <p className="text-[9px] text-gray-400 leading-normal font-mono">
+                          Provide your personal OMDb API Key to dynamically fetch Rotten Tomatoes and IMDb ratings.
+                        </p>
+                        <div className="space-y-1.5">
+                          <label className="text-[8px] text-gray-500 tracking-widest uppercase font-bold">OMDB API KEY</label>
+                          <input
+                            type="password"
+                            placeholder="Enter OMDB API Key..."
+                            value={tempOmdbKey}
+                            onChange={(e) => setTempOmdbKey(e.target.value)}
                             disabled={isSaving}
                             className="w-full bg-gray-950 border border-gray-855 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-accent text-accent font-bold font-mono placeholder-gray-700 disabled:opacity-50"
                           />

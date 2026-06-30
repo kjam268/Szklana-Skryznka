@@ -210,8 +210,118 @@ async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineM
     None
 }
 
+/// Download standard TMDb poster locally to the app data directory
+pub async fn download_poster_locally(app: &tauri::AppHandle, remote_path: &str) -> Option<String> {
+    use tauri::Manager;
+    if remote_path.is_empty() {
+        return None;
+    }
+    // Check if it's already a local file path
+    if std::path::Path::new(remote_path).exists() {
+        return Some(remote_path.to_string());
+    }
+
+    // Determine TMDb URL
+    let url = if remote_path.starts_with("http://") || remote_path.starts_with("https://") {
+        remote_path.to_string()
+    } else if remote_path.starts_with('/') {
+        format!("https://image.tmdb.org/t/p/w500{}", remote_path)
+    } else {
+        format!("https://image.tmdb.org/t/p/w500/{}", remote_path)
+    };
+
+    // Prepare destination path in app_data_dir/posters/
+    let app_dir = app.path().app_data_dir().ok()?;
+    let posters_dir = app_dir.join("posters");
+    if !posters_dir.exists() {
+        let _ = std::fs::create_dir_all(&posters_dir);
+    }
+
+    let extension = if url.contains(".png") { "png" } else if url.contains(".webp") { "webp" } else { "jpg" };
+    let unique_name = format!("{}.{}", uuid::Uuid::new_v4(), extension);
+    let destination_path = posters_dir.join(&unique_name);
+
+    info!("Downloading remote poster: {} -> {:?}", url, destination_path);
+
+    // Fetch and write the file
+    let client = reqwest::Client::new();
+    if let Ok(res) = client.get(&url).send().await {
+        if let Ok(bytes) = res.bytes().await {
+            if std::fs::write(&destination_path, bytes).is_ok() {
+                return Some(destination_path.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Fetch IMDb and Rotten Tomatoes ratings dynamically from OMDb API
+pub async fn fetch_omdb_ratings(
+    title: &str,
+    year: Option<i32>,
+    api_key: &str,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    let client = reqwest::Client::new();
+    let mut req = client.get("https://www.omdbapi.com/")
+        .query(&[("apikey", api_key), ("t", title)]);
+        
+    let year_str = year.map(|y| y.to_string());
+    if let Some(ref y) = year_str {
+        req = req.query(&[("y", y)]);
+    }
+
+    if let Ok(res) = req.send().await {
+        if let Ok(value) = res.json::<serde_json::Value>().await {
+            if value.get("Response").and_then(|r| r.as_str()) == Some("True") {
+                let imdb_score = value.get("imdbRating").and_then(|r| r.as_str()).filter(|s| *s != "N/A").map(|s| s.to_string());
+                let imdb_id = value.get("imdbID").and_then(|r| r.as_str()).filter(|s| *s != "N/A").map(|s| s.to_string());
+                
+                let mut rt_score = None;
+                if let Some(ratings) = value.get("Ratings").and_then(|r| r.as_array()) {
+                    for rating in ratings {
+                        if rating.get("Source").and_then(|s| s.as_str()) == Some("Rotten Tomatoes") {
+                            rt_score = rating.get("Value").and_then(|v| v.as_str()).filter(|s| *s != "N/A").map(|s| s.to_string());
+                        }
+                    }
+                }
+                return Some((imdb_score, rt_score, imdb_id));
+            }
+        }
+    }
+    None
+}
+
 /// Fetch metadata from TMDB if API key is present, otherwise fallback to TVmaze, Jikan, or high quality mock data
 pub async fn fetch_online_metadata(
+    title: &str,
+    year: Option<i32>,
+    media_type: &str,
+    api_key: Option<String>,
+    omdb_key: Option<String>,
+) -> OnlineMetadata {
+    let mut metadata = fetch_raw_online_metadata(title, year, media_type, api_key).await;
+
+    // Get ratings from OMDB if key is configured
+    if let Some(ref o_key) = omdb_key {
+        if !o_key.trim().is_empty() {
+            if let Some((imdb_score, rt_score, imdb_id)) = fetch_omdb_ratings(title, year, o_key).await {
+                if let Some(score) = imdb_score {
+                    metadata.imdb_score = Some(score);
+                }
+                if let Some(score) = rt_score {
+                    metadata.rt_score = Some(score);
+                }
+                if let Some(id) = imdb_id {
+                    metadata.imdb_id = Some(id);
+                }
+            }
+        }
+    }
+
+    metadata
+}
+
+async fn fetch_raw_online_metadata(
     title: &str,
     year: Option<i32>,
     media_type: &str,
@@ -554,6 +664,22 @@ pub fn compute_fast_checksum(path: &Path) -> String {
         return hash;
     }
     "".to_string()
+}
+
+/// Calculate a real content checksum by reading the first 1MB of the file content
+pub fn calculate_real_checksum(path: &Path) -> Result<String, std::io::Error> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut buffer = vec![0; 1024 * 1024]; // 1MB buffer
+    let n = file.read(&mut buffer)?;
+    
+    let mut hasher = md5::Context::new();
+    hasher.consume(&buffer[..n]);
+    if let Ok(meta) = path.metadata() {
+        hasher.consume(&meta.len().to_be_bytes());
+    }
+    let hash = format!("{:x}", hasher.compute());
+    Ok(hash)
 }
 
 pub struct ExtractedFileMetadata {
@@ -1069,6 +1195,73 @@ pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+pub async fn run_checksum_deduplication(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use sqlx::Row;
+    info!("Running database checksum-based deduplication...");
+    
+    // Group files by checksum where count > 1
+    let duplicates = sqlx::query(
+        "SELECT checksum, COUNT(*) as cnt FROM media_files WHERE checksum IS NOT NULL AND checksum != '' GROUP BY checksum HAVING COUNT(*) > 1"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for dup in duplicates {
+        let checksum: String = dup.get("checksum");
+        // Get all files with this checksum, sorted by quality score descending
+        let files = sqlx::query(
+            "SELECT id, media_item_id, file_path, quality_score FROM media_files WHERE checksum = $1 ORDER BY quality_score DESC"
+        )
+        .bind(&checksum)
+        .fetch_all(pool)
+        .await?;
+
+        if files.len() > 1 {
+            let primary_item_id: String = files[0].get("media_item_id");
+            let primary_file_id: String = files[0].get("id");
+
+            for other in &files[1..] {
+                let other_item_id: String = other.get("media_item_id");
+                let other_file_id: String = other.get("id");
+
+                if other_item_id != primary_item_id {
+                    info!("Checksum Deduplication: Merging file {} (item {}) under primary item {}", other_file_id, other_item_id, primary_item_id);
+                    // Merge them: update the file to point to the primary media_item
+                    sqlx::query("UPDATE media_files SET media_item_id = $1 WHERE id = $2")
+                        .bind(&primary_item_id)
+                        .bind(&other_file_id)
+                        .execute(pool)
+                        .await?;
+
+                    // Delete the other empty media item (if it has no other files left)
+                    let remaining_files_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM media_files WHERE media_item_id = $1"
+                    )
+                    .bind(&other_item_id)
+                    .fetch_one(pool)
+                    .await?;
+
+                    if remaining_files_count == 0 {
+                        info!("Checksum Deduplication: Deleting orphaned duplicate media item {}", other_item_id);
+                        sqlx::query("DELETE FROM media_items WHERE id = $1")
+                            .bind(&other_item_id)
+                            .execute(pool)
+                            .await?;
+                    }
+                } else {
+                    // Files belong to the same item, keep only the best quality one
+                    info!("Checksum Deduplication: Same item duplicate files. Keeping file {}, deleting other file {}", primary_file_id, other_file_id);
+                    sqlx::query("DELETE FROM media_files WHERE id = $1")
+                        .bind(&other_file_id)
+                        .execute(pool)
+                        .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn merge_duplicate_item_ids(pool: &SqlitePool, item_ids: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if item_ids.len() <= 1 {
         return Ok(());
@@ -1247,6 +1440,9 @@ pub async fn run_second_layer_deduplication(pool: &SqlitePool) -> Result<(), Box
     // 5. Run standard deduplicate pass
     let _ = deduplicate_database(pool).await?;
 
+    // 6. Run content checksum-based deduplicate pass
+    let _ = run_checksum_deduplication(pool).await?;
+
     Ok(())
 }
 
@@ -1270,9 +1466,16 @@ pub async fn scan_directory(
         warn!("Database de-duplication failed: {}", e);
     }
 
-    // 1. Check if TMDb API key is set in Settings
+    // 1. Check if TMDb and OMDb API keys are set in Settings
     let api_key: Option<String> = sqlx::query_scalar(
         "SELECT value FROM settings WHERE key = 'tmdb_api_key'"
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    let omdb_key: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'omdb_api_key'"
     )
     .fetch_optional(pool)
     .await
@@ -1369,7 +1572,7 @@ pub async fn scan_directory(
             existing_item_id
         } else {
             // Fetch metadata online (TMDb / Fallback maps)
-            let mut online = fetch_online_metadata(&title, year, &media_type, api_key.clone()).await;
+            let mut online = fetch_online_metadata(&title, year, &media_type, api_key.clone(), omdb_key.clone()).await;
 
             // Local reference database fallback if TMDb did not return a poster
             if online.poster_path.is_none() && media_type == "Movie" {
@@ -1400,6 +1603,14 @@ pub async fn scan_directory(
             // Create a new MediaItem
             let new_item_id = format!("item_{}", uuid::Uuid::new_v4());
             let final_runtime = online.runtime.unwrap_or(0);
+            
+            // Download poster locally if online poster_path exists
+            let local_poster_path = if let Some(ref path_str) = online.poster_path {
+                download_poster_locally(app, path_str).await
+            } else {
+                None
+            };
+
             sqlx::query(
                 "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path, rt_score, imdb_score, imdb_id) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
@@ -1412,7 +1623,7 @@ pub async fn scan_directory(
             .bind(final_runtime)
             .bind(&online.synopsis)
             .bind(online.rating)
-            .bind(&online.poster_path)
+            .bind(local_poster_path.clone().or(online.poster_path.clone()))
             .bind(&online.backdrop_path)
             .bind(&online.rt_score)
             .bind(&online.imdb_score)

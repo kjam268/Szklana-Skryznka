@@ -22,39 +22,86 @@ export const DatabaseViewer: React.FC = () => {
 
   useEffect(() => {
     // Map MediaItemDetails to flat rows for AG Grid
-    const mapped = items.map((details) => ({
-      id: details.item.id,
-      title: details.item.title,
-      original_title: details.item.original_title || "",
-      media_type: details.item.media_type,
-      year: details.item.year || 2026,
-      runtime: details.item.runtime,
-      rating: details.item.rating || 5.0,
-      genres: details.genres.join(", "),
-      files_count: details.files.length,
-      subtitles_count: details.subtitles.length,
-      quality_score: details.files[0]?.quality_score !== undefined && details.files[0]?.quality_score !== null
-        ? `${details.files[0].quality_score.toFixed(1)} / 10.0`
-        : "N/A",
-    }));
+    const mapped = items.map((details) => {
+      const firstFile = details.files[0] || {};
+      return {
+        id: details.item.id,
+        title: details.item.title,
+        original_title: details.item.original_title || "",
+        media_type: details.item.media_type,
+        year: details.item.year || 2026,
+        runtime: details.item.runtime,
+        imdb_score: details.item.imdb_score || "N/A",
+        rt_score: details.item.rt_score || "N/A",
+        poster_path: details.item.poster_path || "N/A",
+        genres: details.genres.join(", "),
+        tags: details.tags.join(", "),
+        checksum: firstFile.checksum || "N/A",
+        video_codec: firstFile.video_codec || "N/A",
+        audio_codec: firstFile.audio_codec || "N/A",
+        resolution: firstFile.resolution || "N/A",
+        duration: firstFile.duration || 0,
+        video_bitrate: firstFile.video_bitrate || 0,
+        frame_rate: firstFile.frame_rate || 0.0,
+        audio_channels: firstFile.audio_channels || 0,
+        audio_language: firstFile.audio_language || "N/A",
+        audio_tracks: firstFile.audio_tracks || "N/A",
+        embedded_subtitles: firstFile.embedded_subtitles || "N/A",
+        color_space: firstFile.color_space || "N/A",
+        color_transfer: firstFile.color_transfer || "N/A",
+        color_primaries: firstFile.color_primaries || "N/A",
+        video_profile: firstFile.video_profile || "N/A",
+        video_level: firstFile.video_level || 0,
+        audio_sample_rate: firstFile.audio_sample_rate || "N/A",
+        ebur128_loudness: firstFile.ebur128_loudness !== undefined && firstFile.ebur128_loudness !== null
+          ? `${firstFile.ebur128_loudness.toFixed(2)} LUFS`
+          : "N/A",
+        vmaf_score: firstFile.vmaf_score !== undefined && firstFile.vmaf_score !== null
+          ? firstFile.vmaf_score.toFixed(1)
+          : "N/A",
+        quality_score: firstFile.quality_score !== undefined && firstFile.quality_score !== null
+          ? `${firstFile.quality_score.toFixed(1)} / 100`
+          : "N/A",
+      };
+    });
     setRowData(mapped);
   }, [items]);
 
   const columnDefs = [
-    { field: "id", headerName: "ID", width: 140, editable: false },
-    { field: "title", headerName: "TITLE", width: 180, editable: true },
-    { field: "original_title", headerName: "ORIGINAL TITLE", width: 160, editable: true },
-    { field: "media_type", headerName: "MEDIA TYPE", width: 120, editable: true, cellEditor: 'agSelectCellEditor', cellEditorParams: {
+    { field: "id", headerName: "ID", width: 100, editable: false },
+    { field: "title", headerName: "TITLE", width: 150, editable: true },
+    { field: "original_title", headerName: "ORIGINAL TITLE", width: 140, editable: true },
+    { field: "media_type", headerName: "TYPE", width: 90, editable: true, cellEditor: 'agSelectCellEditor', cellEditorParams: {
         values: ["Movie", "TVShow", "Episode", "Anime", "Documentary", "Educational", "Bumper", "StationID", "Trailer", "Commercial"]
       } 
     },
-    { field: "year", headerName: "YEAR", width: 90, editable: true },
-    { field: "runtime", headerName: "RUNTIME (SEC)", width: 120, editable: true },
-    { field: "rating", headerName: "RATING", width: 90, editable: true },
-    { field: "genres", headerName: "GENRES", width: 140, editable: true },
+    { field: "year", headerName: "YEAR", width: 70, editable: true },
+    { field: "runtime", headerName: "TMDb RUNTIME (MIN)", width: 140, editable: true },
+    { field: "imdb_score", headerName: "IMDb SCORE", width: 100, editable: true },
+    { field: "rt_score", headerName: "RT SCORE", width: 100, editable: true },
+    { field: "genres", headerName: "GENRES", width: 130, editable: true },
+    { field: "tags", headerName: "TAGS", width: 130, editable: true },
+    { field: "poster_path", headerName: "POSTER PATH/URL", width: 180, editable: true },
+    { field: "checksum", headerName: "FILE CHECKSUM", width: 140, editable: false },
+    { field: "video_codec", headerName: "VIDEO CODEC", width: 110, editable: false },
+    { field: "audio_codec", headerName: "AUDIO CODEC", width: 110, editable: false },
+    { field: "resolution", headerName: "RESOLUTION", width: 110, editable: false },
+    { field: "duration", headerName: "DURATION (SEC)", width: 120, editable: false },
+    { field: "video_bitrate", headerName: "BITRATE", width: 95, editable: false },
+    { field: "frame_rate", headerName: "FRAME RATE", width: 100, editable: false },
+    { field: "audio_channels", headerName: "AUDIO CH", width: 90, editable: false },
+    { field: "audio_language", headerName: "AUDIO LANG", width: 110, editable: false },
+    { field: "audio_tracks", headerName: "AUDIO TRACKS", width: 130, editable: false },
+    { field: "embedded_subtitles", headerName: "EMBEDDED SUBS", width: 135, editable: false },
+    { field: "color_space", headerName: "COLOR SPACE", width: 115, editable: false },
+    { field: "color_transfer", headerName: "COLOR TRNS", width: 110, editable: false },
+    { field: "color_primaries", headerName: "COLOR PRIM", width: 110, editable: false },
+    { field: "video_profile", headerName: "VIDEO PROF", width: 110, editable: false },
+    { field: "video_level", headerName: "VIDEO LVL", width: 95, editable: false },
+    { field: "audio_sample_rate", headerName: "SAMPLE RATE", width: 115, editable: false },
+    { field: "ebur128_loudness", headerName: "LOUDNESS", width: 110, editable: false },
+    { field: "vmaf_score", headerName: "VMAF", width: 80, editable: false },
     { field: "quality_score", headerName: "QUALITY", width: 100, editable: false },
-    { field: "files_count", headerName: "FILES", width: 80, editable: false },
-    { field: "subtitles_count", headerName: "SUBS", width: 80, editable: false },
   ];
 
   // Auto-save edited cell
@@ -73,9 +120,12 @@ export const DatabaseViewer: React.FC = () => {
         media_type: data.media_type,
         year: parseInt(data.year),
         runtime: parseInt(data.runtime),
-        rating: parseFloat(data.rating),
+        imdb_score: data.imdb_score === "N/A" ? "" : data.imdb_score,
+        rt_score: data.rt_score === "N/A" ? "" : data.rt_score,
+        poster_path: data.poster_path === "N/A" ? "" : data.poster_path,
       },
       genres: data.genres.split(",").map((g: string) => g.trim()).filter((g: string) => g !== ""),
+      tags: data.tags.split(",").map((t: string) => t.trim()).filter((t: string) => t !== ""),
     };
 
     try {
