@@ -292,18 +292,33 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           </div>
 
           <div className={`flex items-center justify-between transition-all duration-300 ${isCollapsed ? "justify-center space-y-2 flex-col" : "flex-row"}`}>
-            <span className="flex items-center space-x-1.5">
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                tmdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
-                tmdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
-                tmdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
-              }`} title={`TMDb API Status: ${tmdbStatus.toUpperCase()}`} />
-              <span className={`transition-all duration-300 origin-left overflow-hidden ${
-                isCollapsed ? "opacity-0 w-0 scale-x-0" : "opacity-100 w-auto scale-x-100"
-              }`}>
-                <span className="font-bold whitespace-nowrap">TMDB</span>
+            <div className="flex items-center space-x-3">
+              <span className="flex items-center space-x-1.5">
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  tmdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
+                  tmdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
+                  tmdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
+                }`} title={`TMDb API Status: ${tmdbStatus.toUpperCase()}`} />
+                <span className={`transition-all duration-300 origin-left overflow-hidden ${
+                  isCollapsed ? "opacity-0 w-0 scale-x-0" : "opacity-100 w-auto scale-x-100"
+                }`}>
+                  <span className="font-bold whitespace-nowrap">TMDB</span>
+                </span>
               </span>
-            </span>
+
+              <span className="flex items-center space-x-1.5">
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  omdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
+                  omdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
+                  omdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
+                }`} title={`OMDb API Status: ${omdbStatus.toUpperCase()}`} />
+                <span className={`transition-all duration-300 origin-left overflow-hidden ${
+                  isCollapsed ? "opacity-0 w-0 scale-x-0" : "opacity-100 w-auto scale-x-100"
+                }`}>
+                  <span className="font-bold whitespace-nowrap">OMDB</span>
+                </span>
+              </span>
+            </div>
 
             <button 
               onClick={handleOpenModal}

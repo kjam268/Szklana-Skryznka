@@ -24,10 +24,11 @@ export const DatabaseViewer: React.FC = () => {
     // Map MediaItemDetails to flat rows for AG Grid
     const mapped = items.map((details) => {
       const firstFile = details.files[0] || {};
+      const filename = firstFile.file_path ? firstFile.file_path.split(/[/\\]/).pop() : "N/A";
       return {
         id: details.item.id,
-        title: details.item.title,
-        original_title: details.item.original_title || "",
+        title: filename || "N/A", // Represents Filename
+        original_title: details.item.title || "", // Represents Library Catalog Title
         media_type: details.item.media_type,
         year: details.item.year || 2026,
         runtime: details.item.runtime,
@@ -69,8 +70,8 @@ export const DatabaseViewer: React.FC = () => {
 
   const columnDefs = [
     { field: "id", headerName: "ID", width: 100, editable: false },
-    { field: "title", headerName: "TITLE", width: 150, editable: true },
-    { field: "original_title", headerName: "ORIGINAL TITLE", width: 140, editable: true },
+    { field: "title", headerName: "FILENAME", width: 180, editable: false }, // Filename represents title, read-only
+    { field: "original_title", headerName: "LIBRARY TITLE", width: 160, editable: true }, // Library title, editable
     { field: "media_type", headerName: "TYPE", width: 90, editable: true, cellEditor: 'agSelectCellEditor', cellEditorParams: {
         values: ["Movie", "TVShow", "Episode", "Anime", "Documentary", "Educational", "Bumper", "StationID", "Trailer", "Commercial"]
       } 
@@ -115,8 +116,8 @@ export const DatabaseViewer: React.FC = () => {
       ...original,
       item: {
         ...original.item,
-        title: data.title,
-        original_title: data.original_title,
+        title: data.original_title, // Save the edited Library Title into item.title
+        original_title: original.item.original_title, // Keep original unmodified database name
         media_type: data.media_type,
         year: parseInt(data.year),
         runtime: parseInt(data.runtime),

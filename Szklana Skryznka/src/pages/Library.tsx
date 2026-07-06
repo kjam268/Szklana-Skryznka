@@ -658,11 +658,16 @@ export const Library: React.FC = () => {
                                   );
                                 })}
                                 {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                                  <div className={`text-[8px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
-                                    details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
+                                  <div className={`text-[8.5px] px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border ${
+                                    details.files[0].quality_score_done === 1
+                                      ? "bg-amber-500/90 text-white border-amber-400/20"
+                                      : "bg-blue-600/90 text-white border-blue-400/20"
                                   }`}>
-                                    <Crown size={8} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
+                                    <Crown size={8} className="fill-current text-white" />
                                     <span>{Math.round(details.files[0].quality_score)}</span>
+                                    <span className="text-[7px] font-normal opacity-85 font-mono ml-0.5">
+                                      {details.files[0].quality_score_done === 1 ? "P2" : "P1"}
+                                    </span>
                                   </div>
                                 )}
                               </div>
@@ -1307,11 +1312,16 @@ export const Library: React.FC = () => {
                               );
                             })}
                             {details.files && details.files[0] && details.files[0].quality_score !== undefined && details.files[0].quality_score !== null && (
-                              <div className={`text-[8px] bg-amber-500/90 px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border border-amber-400/20 ${
-                                details.files[0].quality_score_done === 1 ? "text-white" : "text-background"
+                              <div className={`text-[8.5px] px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border ${
+                                details.files[0].quality_score_done === 1
+                                  ? "bg-amber-500/90 text-white border-amber-400/20"
+                                  : "bg-blue-600/90 text-white border-blue-400/20"
                               }`}>
-                                <Crown size={8} className={`fill-current ${details.files[0].quality_score_done === 1 ? "text-white" : "text-background"}`} />
+                                <Crown size={8} className="fill-current text-white" />
                                 <span>{Math.round(details.files[0].quality_score)}</span>
+                                <span className="text-[7px] font-normal opacity-85 font-mono ml-0.5">
+                                  {details.files[0].quality_score_done === 1 ? "P2" : "P1"}
+                                </span>
                               </div>
                             )}
                           </div>
@@ -1609,7 +1619,7 @@ export const Library: React.FC = () => {
                         <span className="text-gray-500">QUALITY SCORE:</span>
                         <span className="text-accent font-bold">
                           {selectedItem.files[0].quality_score !== undefined && selectedItem.files[0].quality_score !== null
-                            ? `${Math.round(selectedItem.files[0].quality_score)} / 100`
+                            ? `${Math.round(selectedItem.files[0].quality_score)} / 100 (${selectedItem.files[0].quality_score_done === 1 ? "Phase 2 Complete" : "Phase 1 - Basic"})`
                             : "N/A"}
                         </span>
                       </div>

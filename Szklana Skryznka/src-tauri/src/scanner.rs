@@ -1042,6 +1042,11 @@ pub fn calculate_quality_score(
     // 1. Video Resolution
     let height = if resolution.eq_ignore_ascii_case("4K") {
         2160
+    } else if resolution.contains('x') {
+        resolution.split('x')
+            .nth(1)
+            .and_then(|s| s.chars().filter(|c| c.is_digit(10)).collect::<String>().parse::<i32>().ok())
+            .unwrap_or(0)
     } else {
         resolution.chars()
             .filter(|c| c.is_digit(10))
@@ -1069,9 +1074,9 @@ pub fn calculate_quality_score(
 
     // 3. Video Codec Efficiency
     let v_codec = video_codec.to_uppercase();
-    if v_codec.contains("HEVC") || v_codec.contains("H265") || v_codec.contains("AV1") {
+    if v_codec.contains("HEVC") || v_codec.contains("H265") || v_codec.contains("H.265") || v_codec.contains("AV1") {
         score += 100;
-    } else if v_codec.contains("H264") || v_codec.contains("AVC") {
+    } else if v_codec.contains("H264") || v_codec.contains("H.264") || v_codec.contains("AVC") {
         score += 60;
     } else {
         score += 30;
@@ -1126,7 +1131,8 @@ pub fn calculate_quality_score(
     }
 
     // 8. Audio Sample Rate
-    if let Ok(rate_hz) = audio_sample_rate.parse::<i32>() {
+    let rate_digits: String = audio_sample_rate.chars().filter(|c| c.is_digit(10)).collect();
+    if let Ok(rate_hz) = rate_digits.parse::<i32>() {
         if rate_hz >= 96000 {
             score += 25;
         } else if rate_hz >= 48000 {
