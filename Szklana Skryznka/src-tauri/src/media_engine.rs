@@ -40,7 +40,7 @@ pub fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
         .args([
             "-v", "error",
             "-show_entries", "format=duration,bit_rate",
-            "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags",
+            "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags,color_space,color_transfer,color_primaries,profile,level,sample_rate",
             "-of", "json",
             file_path
         ])

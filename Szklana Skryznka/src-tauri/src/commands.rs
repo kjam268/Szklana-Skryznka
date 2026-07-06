@@ -158,12 +158,13 @@ pub async fn get_media(pool: DbState<'_>) -> Result<Vec<MediaItemDetails>, Strin
 #[tauri::command]
 pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<String, String> {
     // 1. Update MediaItem
+    let cap_title = crate::scanner::capitalize_title(&details.item.title);
     sqlx::query(
         "UPDATE media_items SET title = $1, original_title = $2, media_type = $3, year = $4, \
          runtime = $5, synopsis = $6, rating = $7, poster_path = $8, backdrop_path = $9, updated_at = $10, \
          rt_score = $11, imdb_score = $12, imdb_id = $13 WHERE id = $14"
     )
-    .bind(&details.item.title)
+    .bind(&cap_title)
     .bind(&details.item.original_title)
     .bind(&details.item.media_type)
     .bind(details.item.year)
@@ -655,6 +656,65 @@ pub async fn select_directory() -> Result<Option<String>, String> {
         Some(path) => Ok(Some(path.to_string_lossy().to_string())),
         None => Ok(None)
     }
+}
+
+#[tauri::command]
+pub async fn select_subtitle_file() -> Result<Option<String>, String> {
+    let file_path = rfd::AsyncFileDialog::new()
+        .add_filter("Subtitles", &["srt", "vtt", "ass", "ssa"])
+        .pick_file()
+        .await;
+
+    match file_path {
+        Some(file) => Ok(Some(file.path().to_string_lossy().to_string())),
+        None => Ok(None)
+    }
+}
+
+#[tauri::command]
+pub async fn get_watched_paths(pool: DbState<'_>) -> Result<Vec<String>, String> {
+    let paths_str: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
+        .fetch_optional(&*pool)
+        .await
+        .unwrap_or(None);
+
+    match paths_str {
+        Some(s) => {
+            let list: Vec<String> = s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            Ok(list)
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_watched_path(pool: DbState<'_>, path: String) -> Result<Vec<String>, String> {
+    let paths_str: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
+        .fetch_optional(&*pool)
+        .await
+        .unwrap_or(None);
+
+    let new_list = match paths_str {
+        Some(s) => {
+            let list: Vec<String> = s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty() && p != &path)
+                .collect();
+            list
+        }
+        None => Vec::new(),
+    };
+
+    let joined = new_list.join(",");
+    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scanned_paths', $1)")
+        .bind(&joined)
+        .execute(&*pool)
+        .await;
+
+    Ok(new_list)
 }
 
 #[tauri::command]

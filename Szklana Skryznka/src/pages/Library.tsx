@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useLibraryStore, MediaItemDetails, useNotificationStore } from "../store";
 import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown } from "lucide-react";
 
@@ -25,6 +26,13 @@ export const Library: React.FC = () => {
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);
     return `${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
+  };
+
+  const capitalizeTitle = (title: string): string => {
+    if (!title) return "";
+    return title
+      .toLowerCase()
+      .replace(/\b[a-z]/g, char => char.toUpperCase());
   };
 
   const handleBrowseFolder = async () => {
@@ -60,43 +68,44 @@ export const Library: React.FC = () => {
 
   // Subtitle import fields
   const [subLang, setSubLang] = useState("en");
-  const [subPath, setSubPath] = useState("");
 
 
 
   useEffect(() => {
     fetchItems();
     
-    let unlistenFn: (() => void) | null = null;
-    const setupListener = async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const unlistenLib = await listen("library-updated", () => {
-          fetchItems(true);
-        });
-        
-        const unlistenSelect = await listen<string>("select-media-item", (event) => {
-          const itemId = event.payload;
-          const targetItem = useLibraryStore.getState().items.find(i => i.item.id === itemId);
-          if (targetItem) {
-            handleSelectCard(targetItem);
-          }
-        });
+    let active = true;
+    let unlistenLib: (() => void) | null = null;
+    let unlistenSelect: (() => void) | null = null;
 
-        unlistenFn = () => {
-          unlistenLib();
-          unlistenSelect();
-        };
-      } catch (e) {
-        console.error("Failed to setup listeners:", e);
+    const setupListeners = async () => {
+      const unsubLib = await listen("library-updated", () => {
+        console.log("React library-updated event triggered! Performing silent fetchItems...");
+        fetchItems(true);
+      });
+      const unsubSelect = await listen<string>("select-media-item", (event) => {
+        const itemId = event.payload;
+        const targetItem = useLibraryStore.getState().items.find(i => i.item.id === itemId);
+        if (targetItem) {
+          handleSelectCard(targetItem);
+        }
+      });
+
+      if (!active) {
+        unsubLib();
+        unsubSelect();
+      } else {
+        unlistenLib = unsubLib;
+        unlistenSelect = unsubSelect;
       }
     };
-    setupListener();
+
+    setupListeners();
 
     return () => {
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      active = false;
+      if (unlistenLib) unlistenLib();
+      if (unlistenSelect) unlistenSelect();
     };
   }, [fetchItems]);
 
@@ -117,14 +126,11 @@ export const Library: React.FC = () => {
     if (selectedItem) {
       const updated = items.find((item) => item.item.id === selectedItem.item.id);
       if (updated) {
-        const currentScore = selectedItem.files[0]?.quality_score;
-        const currentDone = selectedItem.files[0]?.quality_score_done;
-        const newScore = updated.files[0]?.quality_score;
-        const newDone = updated.files[0]?.quality_score_done;
-        
-        if (currentScore !== newScore || currentDone !== newDone) {
+        if (JSON.stringify(selectedItem) !== JSON.stringify(updated)) {
           setSelectedItem(updated);
         }
+      } else {
+        setSelectedItem(null);
       }
     }
   }, [items, selectedItem]);
@@ -186,18 +192,21 @@ export const Library: React.FC = () => {
   };
 
   const handleImportSubtitle = async () => {
-    if (!selectedItem || !subPath) return;
+    if (!selectedItem) return;
     try {
-      // Call actual tauri command
       const { invoke } = await import("@tauri-apps/api/core");
+      // 1. Open native Finder file selector
+      const pickedPath = await invoke<string | null>("select_subtitle_file");
+      if (!pickedPath) return; // User cancelled
+
+      // 2. Import subtitle file
       await invoke("import_subtitle", { 
         mediaItemId: selectedItem.item.id,
         language: subLang,
         subtitleType: "external",
-        filePath: subPath 
+        filePath: pickedPath 
       });
-      showToast("Subtitle file imported!", "success");
-      setSubPath("");
+      showToast(`Subtitle file (${subLang.toUpperCase()}) imported!`, "success");
       // Refresh items
       await fetchItems();
     } catch (e) {
@@ -661,22 +670,54 @@ export const Library: React.FC = () => {
                                   <div className={`text-[8.5px] px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border ${
                                     details.files[0].quality_score_done === 1
                                       ? "bg-amber-500/90 text-white border-amber-400/20"
-                                      : "bg-blue-600/90 text-white border-blue-400/20"
+                                      : (details.files[0].video_codec && details.files[0].video_codec !== "Unknown"
+                                          ? "bg-slate-500/90 text-white border-slate-400/20"
+                                          : "bg-blue-600/90 text-white border-blue-400/20")
                                   }`}>
                                     <Crown size={8} className="fill-current text-white" />
-                                    <span>{Math.round(details.files[0].quality_score)}</span>
-                                    <span className="text-[7px] font-normal opacity-85 font-mono ml-0.5">
-                                      {details.files[0].quality_score_done === 1 ? "P2" : "P1"}
+                                    <span>
+                                      {details.files[0].video_codec && details.files[0].video_codec !== "Unknown"
+                                        ? Math.round(details.files[0].quality_score)
+                                        : "-"}
                                     </span>
                                   </div>
                                 )}
                               </div>
                             </div>
                             <div className="p-3 space-y-1">
-                              <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
+                              <div className="text-xs font-bold text-gray-200 truncate">{capitalizeTitle(details.item.title)}</div>
                               <div className="flex justify-between items-center text-[10px] text-gray-500">
-                                <span>{details.item.year || "Unknown"}</span>
-                                <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900">{formatRuntime(details.item.runtime)}</span>
+                                <div className="flex items-center space-x-1.5 min-w-0">
+                                  <span className="shrink-0">{details.item.year || "Unknown"}</span>
+                                  {details.subtitles && details.subtitles.length > 0 && (
+                                    <div className="flex items-center space-x-0.5 overflow-hidden">
+                                      {details.subtitles.some(s => s.language === "en") && (
+                                        <span className="text-[7.5px] font-extrabold px-1 rounded bg-emerald-600/90 text-white tracking-widest leading-none py-[2px] border border-emerald-400/20 shrink-0" title="English Subtitles Available">EN</span>
+                                      )}
+                                      {details.subtitles.some(s => s.language === "fr") && (
+                                        <span className="text-[7.5px] font-extrabold px-1 rounded bg-violet-600/90 text-white tracking-widest leading-none py-[2px] border border-violet-400/20 shrink-0" title="French Subtitles Available">FR</span>
+                                      )}
+                                      {(() => {
+                                        const otherSubs = details.subtitles
+                                          .filter(s => s.language !== "en" && s.language !== "fr")
+                                          .map(s => s.language.toUpperCase());
+                                        if (otherSubs.length > 0) {
+                                          const uniqueOthers = Array.from(new Set(otherSubs));
+                                          return (
+                                            <span 
+                                              className="text-[7.5px] font-extrabold px-1 rounded bg-slate-700/90 text-white leading-none py-[2px] border border-slate-600/20 cursor-pointer shrink-0"
+                                              title={uniqueOthers.join(", ")}
+                                            >
+                                              +
+                                            </span>
+                                          );
+                                        }
+                                        return null;
+                                      })()}
+                                    </div>
+                                  )}
+                                </div>
+                                <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
                               </div>
                             </div>
                           </div>
@@ -1315,21 +1356,53 @@ export const Library: React.FC = () => {
                               <div className={`text-[8.5px] px-1.5 py-0.5 rounded tracking-wider font-extrabold flex items-center space-x-1 shadow border ${
                                 details.files[0].quality_score_done === 1
                                   ? "bg-amber-500/90 text-white border-amber-400/20"
-                                  : "bg-blue-600/90 text-white border-blue-400/20"
+                                  : (details.files[0].video_codec && details.files[0].video_codec !== "Unknown"
+                                      ? "bg-slate-500/90 text-white border-slate-400/20"
+                                      : "bg-blue-600/90 text-white border-blue-400/20")
                               }`}>
                                 <Crown size={8} className="fill-current text-white" />
-                                <span>{Math.round(details.files[0].quality_score)}</span>
-                                <span className="text-[7px] font-normal opacity-85 font-mono ml-0.5">
-                                  {details.files[0].quality_score_done === 1 ? "P2" : "P1"}
+                                <span>
+                                  {details.files[0].video_codec && details.files[0].video_codec !== "Unknown"
+                                    ? Math.round(details.files[0].quality_score)
+                                    : "-"}
                                 </span>
                               </div>
                             )}
                           </div>
                         </div>
                         <div className="p-3 space-y-1">
-                          <div className="text-xs font-bold text-gray-200 truncate">{details.item.title}</div>
+                          <div className="text-xs font-bold text-gray-200 truncate">{capitalizeTitle(details.item.title)}</div>
                           <div className="flex justify-between items-center text-[10px] text-gray-500">
-                            <span>{details.item.year || "Unknown"}</span>
+                            <div className="flex items-center space-x-1.5 min-w-0">
+                              <span className="shrink-0">{details.item.year || "Unknown"}</span>
+                              {details.subtitles && details.subtitles.length > 0 && (
+                                <div className="flex items-center space-x-0.5 overflow-hidden">
+                                  {details.subtitles.some(s => s.language === "en") && (
+                                    <span className="text-[7.5px] font-extrabold px-1 rounded bg-emerald-600/90 text-white tracking-widest leading-none py-[2px] border border-emerald-400/20 shrink-0" title="English Subtitles Available">EN</span>
+                                  )}
+                                  {details.subtitles.some(s => s.language === "fr") && (
+                                    <span className="text-[7.5px] font-extrabold px-1 rounded bg-violet-600/90 text-white tracking-widest leading-none py-[2px] border border-violet-400/20 shrink-0" title="French Subtitles Available">FR</span>
+                                  )}
+                                  {(() => {
+                                    const otherSubs = details.subtitles
+                                      .filter(s => s.language !== "en" && s.language !== "fr")
+                                      .map(s => s.language.toUpperCase());
+                                    if (otherSubs.length > 0) {
+                                      const uniqueOthers = Array.from(new Set(otherSubs));
+                                      return (
+                                        <span 
+                                          className="text-[7.5px] font-extrabold px-1 rounded bg-slate-700/90 text-white leading-none py-[2px] border border-slate-600/20 cursor-pointer shrink-0"
+                                          title={uniqueOthers.join(", ")}
+                                        >
+                                          +
+                                        </span>
+                                      );
+                                    }
+                                    return null;
+                                  })()}
+                                </div>
+                              )}
+                            </div>
                             <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
                           </div>
                         </div>
@@ -1539,14 +1612,11 @@ export const Library: React.FC = () => {
                       >
                         <option value="en">EN</option>
                         <option value="fr">FR</option>
+                        <option value="es">ES</option>
+                        <option value="de">DE</option>
+                        <option value="it">IT</option>
+                        <option value="pl">PL</option>
                       </select>
-                      <input
-                        type="text"
-                        placeholder="Path to subtitle file..."
-                        value={subPath}
-                        onChange={(e) => setSubPath(e.target.value)}
-                        className="flex-1 bg-gray-900 border border-gray-800 rounded px-2 py-1 text-[10px] focus:outline-none focus:border-accent"
-                      />
                       <button
                         onClick={handleImportSubtitle}
                         className="bg-gray-800 border border-gray-700 px-2 py-1 rounded hover:bg-accent hover:text-background text-[10px] flex items-center space-x-1"
@@ -1619,7 +1689,9 @@ export const Library: React.FC = () => {
                         <span className="text-gray-500">QUALITY SCORE:</span>
                         <span className="text-accent font-bold">
                           {selectedItem.files[0].quality_score !== undefined && selectedItem.files[0].quality_score !== null
-                            ? `${Math.round(selectedItem.files[0].quality_score)} / 100 (${selectedItem.files[0].quality_score_done === 1 ? "Phase 2 Complete" : "Phase 1 - Basic"})`
+                            ? (selectedItem.files[0].video_codec && selectedItem.files[0].video_codec !== "Unknown"
+                                ? `${Math.round(selectedItem.files[0].quality_score)} / 100 (${selectedItem.files[0].quality_score_done === 1 ? "Phase 2 Complete" : "Phase 1 - Basic"})`
+                                : `- / 100 (Pending Analysis)`)
                             : "N/A"}
                         </span>
                       </div>

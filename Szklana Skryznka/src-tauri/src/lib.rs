@@ -171,6 +171,30 @@ pub fn run() {
                     }
                 }
 
+                // Trigger full sync-and-scan scan of all registered library directories on load/startup
+                let scanned_paths_str: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap_or(None);
+
+                if let Some(paths_str) = scanned_paths_str {
+                    let startup_pool = pool.clone();
+                    let startup_handle = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let paths: Vec<String> = paths_str.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        for path in paths {
+                            tracing::info!("Startup Scan: Pruning and scanning watched path: {}", path);
+                            let _ = scanner::scan_directory(&startup_handle, &startup_pool, &path).await;
+                        }
+                        
+                        let _ = startup_handle.emit("library-updated", ());
+                    });
+                }
+
                 // Spawn filesystem folder watcher thread (Critic D)
                 let watcher_pool = pool.clone();
                 let watcher_handle = handle.clone();
@@ -246,25 +270,21 @@ pub fn run() {
                         while let Ok(res) = rx.try_recv() {
                             match res {
                                 Ok(event) => {
-                                    match event.kind {
-                                        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(_) => {
-                                            // Make sure the event is a video file or subtitle addition
-                                            for path in event.paths {
-                                                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                                                    let ext_l = ext.to_lowercase();
-                                                    if ext_l == "mp4" || ext_l == "mkv" || ext_l == "avi" || ext_l == "mov" || ext_l == "srt" {
-                                                        let path_str = path.to_string_lossy();
-                                                        for watched in &watched_paths {
-                                                            if path_str.starts_with(watched) {
-                                                                should_trigger_scan = true;
-                                                                trigger_path = watched.clone();
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                    // Match any event (Create, Remove, Modify, or Any other changes)
+                                    for path in event.paths {
+                                        // Ignore macOS/hidden temporary files starting with '.'
+                                        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                                            if filename.starts_with('.') {
+                                                continue;
                                             }
                                         }
-                                        _ => {}
+                                        let path_str = path.to_string_lossy();
+                                        for watched in &watched_paths {
+                                            if path_str.starts_with(watched) {
+                                                should_trigger_scan = true;
+                                                trigger_path = watched.clone();
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => eprintln!("Watcher channel error: {:?}", e),
@@ -424,22 +444,17 @@ pub fn run() {
                             }
                         }
 
-                        let pending_files = sqlx::query(
-                            "SELECT id, file_path, resolution, video_bitrate, audio_channels, video_codec, audio_codec \
-                             FROM media_files WHERE quality_score_done = 0 OR quality_score_done IS NULL"
+                        // --- Stage 1: Query files pending Phase 1 (ffprobe metadata) ---
+                        // A file is pending Phase 1 if its video_codec is 'Unknown' or NULL.
+                        let pending_p1 = sqlx::query(
+                            "SELECT id, file_path FROM media_files WHERE video_codec = 'Unknown' OR video_codec IS NULL"
                         )
                         .fetch_all(&worker_pool)
                         .await;
 
-                        if let Ok(rows) = pending_files {
-                            if rows.is_empty() {
-                                if let Some(tray) = worker_handle.tray_by_id("main-tray") {
-                                    let _ = tray.set_tooltip(Some("Szklana Skryznka: Idle".to_string()));
-                                }
-                                let _ = status_item_clone.set_text("Szklana Skryznka: Idle");
-                                let _ = progress_item_clone.set_text("");
-                            } else {
-                                for row in rows {
+                        if let Ok(p1_rows) = pending_p1 {
+                            if !p1_rows.is_empty() {
+                                for row in p1_rows {
                                     use sqlx::Row;
                                     let id: String = row.get("id");
                                     let file_path: String = row.get("file_path");
@@ -449,9 +464,61 @@ pub fn run() {
                                         .and_then(|n| n.to_str())
                                         .unwrap_or(&file_path);
 
-                                    tracing::info!("Background worker processing Phase 1 (ffprobe metadata) & Phase 2 (visual quality check) for: {}", file_path);
+                                    tracing::info!("Background worker processing Phase 1 (ffprobe metadata) for: {}", file_path);
+                                    let _ = status_item_clone.set_text(&format!("Phase 1: Analyzing {}", filename));
 
-                                    // Load parent item_id
+                                    // Extract metadata
+                                    let path = std::path::Path::new(&file_path);
+                                    let meta = scanner::extract_metadata(path);
+
+                                    // Calculate initial metadata score
+                                    let initial_score = scanner::calculate_quality_score(
+                                        &meta.resolution,
+                                        meta.video_bitrate,
+                                        meta.audio_channels,
+                                        &meta.video_codec,
+                                        &meta.audio_codec,
+                                        meta.frame_rate,
+                                        &meta.color_space,
+                                        &meta.color_transfer,
+                                        &meta.color_primaries,
+                                        &meta.video_profile,
+                                        meta.video_level,
+                                        &meta.audio_sample_rate,
+                                        None,
+                                        None,
+                                    );
+
+                                    // Update database with ffprobe details and initial quality_score (done = 0)
+                                    let _ = sqlx::query(
+                                        "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
+                                         video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
+                                         audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
+                                         color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16, \
+                                         quality_score = $17, quality_score_done = 0 WHERE id = $18"
+                                    )
+                                    .bind(meta.duration)
+                                    .bind(&meta.resolution)
+                                    .bind(&meta.video_codec)
+                                    .bind(&meta.audio_codec)
+                                    .bind(meta.video_bitrate)
+                                    .bind(meta.frame_rate)
+                                    .bind(meta.audio_channels)
+                                    .bind(&meta.audio_language)
+                                    .bind(&meta.audio_tracks)
+                                    .bind(&meta.embedded_subtitles)
+                                    .bind(&meta.color_space)
+                                    .bind(&meta.color_transfer)
+                                    .bind(&meta.color_primaries)
+                                    .bind(&meta.video_profile)
+                                    .bind(meta.video_level)
+                                    .bind(&meta.audio_sample_rate)
+                                    .bind(initial_score)
+                                    .bind(&id)
+                                    .execute(&worker_pool)
+                                    .await;
+
+                                    // Update runtime on media_items if not set yet
                                     let item_id: Option<String> = sqlx::query_scalar(
                                         "SELECT media_item_id FROM media_files WHERE id = $1"
                                     )
@@ -461,39 +528,6 @@ pub fn run() {
                                     .unwrap_or(None);
 
                                     if let Some(item_id) = item_id {
-
-                                        // --- PHASE 1: Extract file metadata via ffprobe ---
-                                        let path = std::path::Path::new(&file_path);
-                                        let meta = scanner::extract_metadata(path);
-
-                                        // Update database table media_files with these details
-                                        let _ = sqlx::query(
-                                            "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
-                                             video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-                                             audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
-                                             color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16 WHERE id = $17"
-                                        )
-                                        .bind(meta.duration)
-                                        .bind(&meta.resolution)
-                                        .bind(&meta.video_codec)
-                                        .bind(&meta.audio_codec)
-                                        .bind(meta.video_bitrate)
-                                        .bind(meta.frame_rate)
-                                        .bind(meta.audio_channels)
-                                        .bind(&meta.audio_language)
-                                        .bind(&meta.audio_tracks)
-                                        .bind(&meta.embedded_subtitles)
-                                        .bind(&meta.color_space)
-                                        .bind(&meta.color_transfer)
-                                        .bind(&meta.color_primaries)
-                                        .bind(&meta.video_profile)
-                                        .bind(meta.video_level)
-                                        .bind(&meta.audio_sample_rate)
-                                        .bind(&id)
-                                        .execute(&worker_pool)
-                                        .await;
-
-                                        // Update runtime on media_items if not set yet
                                         let _ = sqlx::query(
                                             "UPDATE media_items SET runtime = $1 WHERE id = $2 AND (runtime = 0 OR runtime IS NULL)"
                                         )
@@ -502,66 +536,117 @@ pub fn run() {
                                         .execute(&worker_pool)
                                         .await;
 
-                                        // Run automated tag cleaning rules (e.g. Shorts/Animation/Movie conflicts)
                                         let _ = scanner::check_and_clean_tags(&worker_pool, &item_id).await;
-
-                                        // --- PHASE 2: Fast Keyframe Sampling visual analysis using FFmpeg ---
-                                        let loudness = crate::media_engine::run_ffmpeg_ebur128(&file_path).ok();
-
-                                        let visual_score = evaluate_visual_quality(
-                                            &file_path,
-                                            meta.duration,
-                                            filename,
-                                            &status_item_clone,
-                                            &progress_item_clone,
-                                            &worker_handle,
-                                        );
-
-                                        let vmaf_score = visual_score; // Perceptual visual quality score acts directly as the VMAF score representation
-
-                                        let metadata_score = scanner::calculate_quality_score(
-                                            &meta.resolution,
-                                            meta.video_bitrate,
-                                            meta.audio_channels,
-                                            &meta.video_codec,
-                                            &meta.audio_codec,
-                                            meta.frame_rate,
-                                            &meta.color_space,
-                                            &meta.color_transfer,
-                                            &meta.color_primaries,
-                                            &meta.video_profile,
-                                            meta.video_level,
-                                            &meta.audio_sample_rate,
-                                            vmaf_score,
-                                            loudness,
-                                        );
-
-                                        let score = match visual_score {
-                                            Some(vis) => ((metadata_score * 0.4) + (vis * 0.6)).clamp(0.0, 100.0),
-                                            None => metadata_score,
-                                        };
-
-                                        // Calculate real content checksum in the background
-                                        let path_buf = std::path::Path::new(&file_path);
-                                        let real_checksum = scanner::calculate_real_checksum(&path_buf).unwrap_or_else(|_| "".to_string());
-
-                                        // Write final score and set quality_score_done = 1
-                                        let _ = sqlx::query(
-                                            "UPDATE media_files SET quality_score = $1, quality_score_done = 1, ebur128_loudness = $2, vmaf_score = $3, checksum = $4 WHERE id = $5"
-                                        )
-                                        .bind(score)
-                                        .bind(loudness)
-                                        .bind(vmaf_score)
-                                        .bind(&real_checksum)
-                                        .bind(&id)
-                                        .execute(&worker_pool)
-                                        .await;
-
-                                        // Deduplication will run at the end of the batch
-
-                                        // Notify frontend
-                                        let _ = worker_handle.emit("library-updated", ());
                                     }
+
+                                    // Emit update to show silver badge immediately
+                                    let _ = worker_handle.emit("library-updated", ());
+                                }
+                                continue;
+                            }
+                        }
+
+                        // --- Stage 2: Query files pending Phase 2 (ffmpeg loudness, vmaf, checksum) ---
+                        // ONLY WHEN ALL Phase 1 files are completed (which is true since we continued above if any existed).
+                        let pending_p2 = sqlx::query(
+                            "SELECT id, file_path FROM media_files WHERE (quality_score_done = 0 OR quality_score_done IS NULL) AND video_codec != 'Unknown' AND video_codec IS NOT NULL"
+                        )
+                        .fetch_all(&worker_pool)
+                        .await;
+
+                        if let Ok(p2_rows) = pending_p2 {
+                            if p2_rows.is_empty() {
+                                if let Some(tray) = worker_handle.tray_by_id("main-tray") {
+                                    let _ = tray.set_tooltip(Some("Szklana Skryznka: Idle".to_string()));
+                                }
+                                let _ = status_item_clone.set_text("Szklana Skryznka: Idle");
+                                let _ = progress_item_clone.set_text("");
+                            } else {
+                                for row in p2_rows {
+                                    use sqlx::Row;
+                                    let id: String = row.get("id");
+                                    let file_path: String = row.get("file_path");
+
+                                    let filename = std::path::Path::new(&file_path)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(&file_path);
+
+                                    tracing::info!("Background worker processing Phase 2 (VMAF/loudness) for: {}", file_path);
+
+                                    // Run Phase 1 extraction again to guarantee that any previously missing/stale telemetry columns are fully updated
+                                    let path = std::path::Path::new(&file_path);
+                                    let meta = scanner::extract_metadata(path);
+
+                                    // Run Phase 2 analysis
+                                    let loudness = crate::media_engine::run_ffmpeg_ebur128(&file_path).ok();
+
+                                    let visual_score = evaluate_visual_quality(
+                                        &file_path,
+                                        meta.duration,
+                                        filename,
+                                        &status_item_clone,
+                                        &progress_item_clone,
+                                        &worker_handle,
+                                    );
+
+                                    let vmaf_score = visual_score;
+
+                                    let score = scanner::calculate_quality_score(
+                                        &meta.resolution,
+                                        meta.video_bitrate,
+                                        meta.audio_channels,
+                                        &meta.video_codec,
+                                        &meta.audio_codec,
+                                        meta.frame_rate,
+                                        &meta.color_space,
+                                        &meta.color_transfer,
+                                        &meta.color_primaries,
+                                        &meta.video_profile,
+                                        meta.video_level,
+                                        &meta.audio_sample_rate,
+                                        vmaf_score,
+                                        loudness,
+                                    );
+
+                                    // Calculate real content checksum in the background
+                                    let path_buf = std::path::Path::new(&file_path);
+                                    let real_checksum = scanner::calculate_real_checksum(&path_buf).unwrap_or_else(|_| "".to_string());
+
+                                    // Write final score, set quality_score_done = 1, and update all database fields to align with the new telemetry
+                                    let _ = sqlx::query(
+                                        "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
+                                         video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
+                                         audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
+                                         color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16, \
+                                         quality_score = $17, quality_score_done = 1, ebur128_loudness = $18, vmaf_score = $19, checksum = $20 WHERE id = $21"
+                                    )
+                                    .bind(meta.duration)
+                                    .bind(&meta.resolution)
+                                    .bind(&meta.video_codec)
+                                    .bind(&meta.audio_codec)
+                                    .bind(meta.video_bitrate)
+                                    .bind(meta.frame_rate)
+                                    .bind(meta.audio_channels)
+                                    .bind(&meta.audio_language)
+                                    .bind(&meta.audio_tracks)
+                                    .bind(&meta.embedded_subtitles)
+                                    .bind(&meta.color_space)
+                                    .bind(&meta.color_transfer)
+                                    .bind(&meta.color_primaries)
+                                    .bind(&meta.video_profile)
+                                    .bind(meta.video_level)
+                                    .bind(&meta.audio_sample_rate)
+                                    .bind(score)
+                                    .bind(loudness)
+                                    .bind(vmaf_score)
+                                    .bind(&real_checksum)
+                                    .bind(&id)
+                                    .execute(&worker_pool)
+                                    .await;
+
+                                    // Notify frontend to show gold badge immediately
+                                    let _ = worker_handle.emit("library-updated", ());
                                 }
 
                                 // Run second-layer deduplication pass AFTER all files in the batch have been processed
@@ -573,12 +658,6 @@ pub fn run() {
                                 let _ = status_item_clone.set_text("Szklana Skryznka: Idle");
                                 let _ = progress_item_clone.set_text("");
                             }
-                        } else {
-                            if let Some(tray) = worker_handle.tray_by_id("main-tray") {
-                                let _ = tray.set_tooltip(Some("Szklana Skryznka: Idle".to_string()));
-                            }
-                            let _ = status_item_clone.set_text("Szklana Skryznka: Idle");
-                            let _ = progress_item_clone.set_text("");
                         }
                     }
                 });
@@ -667,7 +746,10 @@ pub fn run() {
             commands::quit_app,
             commands::select_custom_poster,
             commands::search_opensubtitles,
-            commands::download_opensubtitles
+            commands::download_opensubtitles,
+            commands::select_subtitle_file,
+            commands::get_watched_paths,
+            commands::remove_watched_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

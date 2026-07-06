@@ -28,7 +28,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   const [isPurging, setIsPurging] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const [purgeFeedback, setPurgeFeedback] = useState("");
-  const [modalTab, setModalTab] = useState<"api_key" | "purges">("api_key");
+  const [modalTab, setModalTab] = useState<"api_key" | "watched_folders" | "purges">("api_key");
+  const [watchedPaths, setWatchedPaths] = useState<string[]>([]);
 
   useEffect(() => {
     let unlistenPurge: any;
@@ -122,6 +123,36 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: "suggestions", label: "Smart Suggestions", icon: Lightbulb },
   ];
 
+  const fetchWatchedPaths = async () => {
+    try {
+      const paths = await invoke<string[]>("get_watched_paths");
+      setWatchedPaths(paths);
+    } catch (e) {
+      console.error("Failed to load watched paths:", e);
+    }
+  };
+
+  const handleAddWatchedFolder = async () => {
+    try {
+      const selected = await invoke<string | null>("select_directory");
+      if (selected) {
+        await invoke("scan_library", { path: selected });
+        await fetchWatchedPaths();
+      }
+    } catch (e) {
+      console.error("Failed to add watched folder:", e);
+    }
+  };
+
+  const handleRemoveWatchedFolder = async (path: string) => {
+    try {
+      const updated = await invoke<string[]>("remove_watched_path", { path });
+      setWatchedPaths(updated);
+    } catch (e) {
+      console.error("Failed to remove watched folder:", e);
+    }
+  };
+
   const handleOpenModal = async () => {
     try {
       const existingKey = await invoke<string | null>("get_setting", { key: "tmdb_api_key" });
@@ -132,6 +163,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       setTempOpensubtitlesKey(existingOpensubtitlesKey || "");
       const existingOmdbKey = await invoke<string | null>("get_setting", { key: "omdb_api_key" });
       setTempOmdbKey(existingOmdbKey || "");
+      await fetchWatchedPaths();
     } catch (e) {
       console.error("Failed to load settings:", e);
     }
@@ -196,6 +228,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       setIsSaving(false);
     }
   };
+
+  const isAllConnected = tmdbStatus === "connected" && omdbStatus === "connected";
+  const isAnyConnected = tmdbStatus === "connected" || omdbStatus === "connected";
+  
+  const aggregateColorClass = isAllConnected 
+    ? "bg-emerald-500 cyan-glow" 
+    : (isAnyConnected ? "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)] animate-pulse" : "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]");
+
+  const aggregateTitle = `Connections: TMDb ${tmdbStatus.toUpperCase()} | OMDb ${omdbStatus.toUpperCase()}`;
 
   return (
     <>
@@ -291,34 +332,38 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             </div>
           </div>
 
-          <div className={`flex items-center justify-between transition-all duration-300 ${isCollapsed ? "justify-center space-y-2 flex-col" : "flex-row"}`}>
-            <div className="flex items-center space-x-3">
-              <span className="flex items-center space-x-1.5">
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  tmdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
-                  tmdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
-                  tmdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
-                }`} title={`TMDb API Status: ${tmdbStatus.toUpperCase()}`} />
-                <span className={`transition-all duration-300 origin-left overflow-hidden ${
-                  isCollapsed ? "opacity-0 w-0 scale-x-0" : "opacity-100 w-auto scale-x-100"
-                }`}>
-                  <span className="font-bold whitespace-nowrap">TMDB</span>
+          <div className={`flex items-center justify-between transition-all duration-300 ${isCollapsed ? "justify-center flex-col space-y-2.5" : "flex-row"}`}>
+            {isCollapsed ? (
+              <span 
+                className={`w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all duration-300 cursor-pointer ${aggregateColorClass}`} 
+                title={aggregateTitle}
+                onClick={handleOpenModal}
+              />
+            ) : (
+              <div className="flex items-center space-x-3">
+                <span className="flex items-center space-x-1.5">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    tmdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
+                    tmdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
+                    tmdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
+                  }`} title={`TMDb API Status: ${tmdbStatus.toUpperCase()}`} />
+                  <span className="transition-all duration-300 origin-left overflow-hidden opacity-100 w-auto scale-x-100">
+                    <span className="font-bold whitespace-nowrap">TMDB</span>
+                  </span>
                 </span>
-              </span>
 
-              <span className="flex items-center space-x-1.5">
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                  omdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
-                  omdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
-                  omdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
-                }`} title={`OMDb API Status: ${omdbStatus.toUpperCase()}`} />
-                <span className={`transition-all duration-300 origin-left overflow-hidden ${
-                  isCollapsed ? "opacity-0 w-0 scale-x-0" : "opacity-100 w-auto scale-x-100"
-                }`}>
-                  <span className="font-bold whitespace-nowrap">OMDB</span>
+                <span className="flex items-center space-x-1.5">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    omdbStatus === "connected" ? "bg-emerald-500 cyan-glow" :
+                    omdbStatus === "disconnected" ? "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" :
+                    omdbStatus === "checking" ? "bg-amber-500 animate-pulse" : "bg-gray-700"
+                  }`} title={`OMDb API Status: ${omdbStatus.toUpperCase()}`} />
+                  <span className="transition-all duration-300 origin-left overflow-hidden opacity-100 w-auto scale-x-100">
+                    <span className="font-bold whitespace-nowrap">OMDB</span>
+                  </span>
                 </span>
-              </span>
-            </div>
+              </div>
+            )}
 
             <button 
               onClick={handleOpenModal}
@@ -381,6 +426,23 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                 <button
                   type="button"
                   onClick={() => {
+                    setModalTab("watched_folders");
+                    setConfirmPurge(false);
+                    setPurgeFeedback("");
+                    setPurgePassword("");
+                    fetchWatchedPaths();
+                  }}
+                  className={`text-left p-2 rounded transition-all font-mono tracking-wider font-bold ${
+                    modalTab === "watched_folders" 
+                      ? "bg-accent/15 text-accent border border-accent/30" 
+                      : "text-gray-400 hover:text-gray-200 hover:bg-gray-800 border border-transparent"
+                  }`}
+                >
+                  WATCHED PATHS
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     setModalTab("purges");
                     setConfirmPurge(false);
                     setPurgeFeedback("");
@@ -397,8 +459,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               </div>
 
               {/* Right Content */}
-              <div className="w-3/4 flex flex-col justify-between">
-                {modalTab === "api_key" ? (
+              <div className="w-3/4 flex flex-col justify-between min-h-[280px]">
+                {modalTab === "api_key" && (
                   <div className="space-y-4 flex-1 flex flex-col justify-between">
                     <div className="space-y-4 max-h-[220px] overflow-y-auto pr-1">
                       
@@ -504,7 +566,47 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                       </button>
                     </div>
                   </div>
-                ) : (
+                )}
+
+                {modalTab === "watched_folders" && (
+                  <div className="space-y-4 flex-1 flex flex-col justify-between">
+                    <div className="space-y-3 flex-1">
+                      <span className="text-[10px] text-accent font-bold tracking-wider block">Watched Folder Libraries</span>
+                      <p className="text-[9px] text-gray-400 leading-normal font-mono">
+                        These directories are scanned automatically for media additions or deletions.
+                      </p>
+                      
+                      <div className="space-y-1.5 max-h-[140px] overflow-y-auto border border-gray-800 rounded bg-gray-950 p-2.5">
+                        {watchedPaths.length === 0 ? (
+                          <div className="text-[9px] text-gray-500 font-mono italic">No folders watched yet.</div>
+                        ) : (
+                          watchedPaths.map((p) => (
+                            <div key={p} className="flex justify-between items-center text-[9px] font-mono text-gray-300 py-1 border-b border-gray-900 last:border-b-0">
+                              <span className="truncate max-w-[280px]" title={p}>{p}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveWatchedFolder(p)}
+                                className="text-rose-500 hover:text-rose-400 font-extrabold focus:outline-none uppercase text-[8px] pl-2"
+                              >
+                                REMOVE
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    
+                    <button
+                      type="button"
+                      onClick={handleAddWatchedFolder}
+                      className="w-full bg-accent/15 border border-accent/35 text-accent hover:bg-accent hover:text-background py-1.5 rounded text-[10px] font-extrabold font-mono tracking-wider transition-all focus:outline-none shadow-md shadow-accent/5 hover:scale-[1.01]"
+                    >
+                      + ADD FOLDER TO WATCH
+                    </button>
+                  </div>
+                )}
+
+                {modalTab === "purges" && (
                   <div className="space-y-3 flex-1 flex flex-col justify-between">
                     <div className="space-y-2">
                       <span className="text-[9px] text-rose-500 font-bold tracking-widest uppercase block">Danger Zone: Purge Assets</span>

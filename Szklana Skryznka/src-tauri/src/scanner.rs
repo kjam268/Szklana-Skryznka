@@ -864,6 +864,25 @@ pub fn extract_metadata(path: &Path) -> ExtractedFileMetadata {
     }
 }
 
+pub fn capitalize_title(title: &str) -> String {
+    let mut capitalized = String::new();
+    let mut start_word = true;
+    for c in title.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            if start_word {
+                capitalized.extend(c.to_uppercase());
+                start_word = false;
+            } else {
+                capitalized.push(c);
+            }
+        } else {
+            capitalized.push(c);
+            start_word = true;
+        }
+    }
+    capitalized
+}
+
 fn clean_filename(filename: &str) -> (String, Option<i32>) {
     let re_year = regex::Regex::new(r"\b(19\d{2}|20\d{2})\b").unwrap();
     let matches: Vec<regex::Match> = re_year.find_iter(filename).collect();
@@ -906,7 +925,7 @@ fn clean_filename(filename: &str) -> (String, Option<i32>) {
     let re_spaces = regex::Regex::new(r"\s+").unwrap();
     let final_title = re_spaces.replace_all(&cleaned_title, " ").trim().to_string();
 
-    (final_title, year)
+    (capitalize_title(&final_title), year)
 }
 
 fn clean_tv_filename(filename: &str) -> Option<(String, String, String)> {
@@ -1467,6 +1486,66 @@ pub async fn scan_directory(
 
     info!("Starting scan of library directory: {}", dir_path);
 
+    // Prune files and items that no longer exist on disk
+    let db_files = sqlx::query("SELECT id, media_item_id, file_path FROM media_files")
+        .fetch_all(pool)
+        .await;
+
+    if let Ok(rows) = db_files {
+        for row in rows {
+            use sqlx::Row;
+            let id: String = row.get("id");
+            let media_item_id: String = row.get("media_item_id");
+            let file_path: String = row.get("file_path");
+
+            let path = Path::new(&file_path);
+            if !path.exists() {
+                info!("File no longer exists on disk: {}. Removing from library database.", file_path);
+                
+                let _ = sqlx::query("DELETE FROM media_files WHERE id = $1")
+                    .bind(&id)
+                    .execute(pool)
+                    .await;
+
+                // Check if any other files are left for this media item
+                let files_left: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM media_files WHERE media_item_id = $1")
+                    .bind(&media_item_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or(0);
+
+                if files_left == 0 {
+                    info!("No files remaining for media item: {}. Deleting item from library catalog.", media_item_id);
+                    let _ = sqlx::query("DELETE FROM media_items WHERE id = $1").bind(&media_item_id).execute(pool).await;
+                    let _ = sqlx::query("DELETE FROM media_genres WHERE media_item_id = $1").bind(&media_item_id).execute(pool).await;
+                    let _ = sqlx::query("DELETE FROM media_tags WHERE media_item_id = $1").bind(&media_item_id).execute(pool).await;
+                    let _ = sqlx::query("DELETE FROM subtitles WHERE media_item_id = $1").bind(&media_item_id).execute(pool).await;
+                }
+            }
+        }
+    }
+
+    let db_subs = sqlx::query("SELECT id, file_path FROM subtitles WHERE subtitle_type = 'external'")
+        .fetch_all(pool)
+        .await;
+
+    if let Ok(sub_rows) = db_subs {
+        for row in sub_rows {
+            use sqlx::Row;
+            let id: String = row.get("id");
+            let file_path: String = row.get("file_path");
+
+            let path = Path::new(&file_path);
+            if !path.exists() {
+                info!("External subtitle file no longer exists: {}. Removing from library database.", file_path);
+                let _ = sqlx::query("DELETE FROM subtitles WHERE id = $1")
+                    .bind(&id)
+                    .execute(pool)
+                    .await;
+            }
+        }
+    }
+
     // Run de-duplication pass
     if let Err(e) = deduplicate_database(pool).await {
         warn!("Database de-duplication failed: {}", e);
@@ -1617,13 +1696,14 @@ pub async fn scan_directory(
                 None
             };
 
+            let capitalized_inserted_title = capitalize_title(&title);
             sqlx::query(
                 "INSERT INTO media_items (id, title, original_title, media_type, year, runtime, synopsis, rating, poster_path, backdrop_path, rt_score, imdb_score, imdb_id) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
             )
             .bind(&new_item_id)
-            .bind(&title)
-            .bind(&title)
+            .bind(&capitalized_inserted_title)
+            .bind(&capitalized_inserted_title)
             .bind(&media_type)
             .bind(year)
             .bind(final_runtime)
