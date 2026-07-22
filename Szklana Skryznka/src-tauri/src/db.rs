@@ -24,11 +24,12 @@ pub async fn init_db(app_handle: &tauri::AppHandle) -> Result<SqlitePool, Box<dy
         fs::File::create(&db_path)?;
     }
 
-    // 4. Configure connection options (enforce foreign keys)
+    // 4. Configure connection options (enforce foreign keys and add busy_timeout retry lock configuration)
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5))
         .foreign_keys(true);
 
     // 5. Connect and build the pool
@@ -42,27 +43,38 @@ pub async fn init_db(app_handle: &tauri::AppHandle) -> Result<SqlitePool, Box<dy
         .run(&pool)
         .await?;
 
-    // Schema updates: Ensure audio_tracks and embedded_subtitles are present in media_files
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN audio_tracks TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN embedded_subtitles TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_space TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_transfer TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN color_primaries TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN video_profile TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN video_level INTEGER;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN audio_sample_rate TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN ebur128_loudness REAL;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN vmaf_score REAL;").execute(&pool).await;
+    // Schema updates: Safe alterations utilizing pragma_table_info to prevent log exceptions
+    add_column_if_missing(&pool, "media_files", "audio_tracks", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "embedded_subtitles", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "color_space", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "color_transfer", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "color_primaries", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "video_profile", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "video_level", "INTEGER").await;
+    add_column_if_missing(&pool, "media_files", "audio_sample_rate", "TEXT").await;
+    add_column_if_missing(&pool, "media_files", "ebur128_loudness", "REAL").await;
+    add_column_if_missing(&pool, "media_files", "vmaf_score", "REAL").await;
     
-    // Schema updates: Ensure rt_score, imdb_score and imdb_id are present in media_items
-    let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN rt_score TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN imdb_score TEXT;").execute(&pool).await;
-    let _ = sqlx::query("ALTER TABLE media_items ADD COLUMN imdb_id TEXT;").execute(&pool).await;
+    add_column_if_missing(&pool, "media_items", "rt_score", "TEXT").await;
+    add_column_if_missing(&pool, "media_items", "imdb_score", "TEXT").await;
+    add_column_if_missing(&pool, "media_items", "imdb_id", "TEXT").await;
 
     // Seed 100k movies reference database
     seed_movies_if_empty(&pool).await?;
 
     Ok(pool)
+}
+
+async fn add_column_if_missing(pool: &SqlitePool, table: &str, column: &str, col_type: &str) {
+    let check_query = format!("SELECT count(*) FROM pragma_table_info('{}') WHERE name = '{}'", table, column);
+    let exists: i64 = sqlx::query_scalar(&check_query)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    if exists == 0 {
+        let alter_query = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type);
+        let _ = sqlx::query(&alter_query).execute(pool).await;
+    }
 }
 
 pub async fn seed_movies_if_empty(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -122,43 +134,47 @@ pub async fn seed_movies_if_empty(pool: &SqlitePool) -> Result<(), sqlx::Error> 
 
     let mut tx = pool.begin().await?;
 
-    for i in 0..100_000 {
-        let adj = adjectives[i % 20];
-        let noun = nouns[(i / 20) % 20];
-        let suf = suffixes[(i / 400) % 20];
-        let md = modifiers[(i / 8000) % 20];
-
-        let title = format!("{} {} {} {}", adj, noun, suf, md);
-        let id = format!("am_{:05}", i);
-        let year = 1930 + (i % 97) as i32;
-        let director = directors[(i / 3) % 20];
-        
-        let act1 = actors[(i / 7) % 20];
-        let act2 = actors[(i / 11) % 20];
-        let cast_actors = format!("{}, {}", act1, act2);
-
-        let synopsis = format!(
-            "An outstanding worldwide masterpiece directed by {} telling a deep story about {} {} in relation to the legendary {} {}.",
-            director, adj.to_lowercase(), noun.to_lowercase(), suf.to_lowercase(), md.to_lowercase()
+    let batch_size = 100;
+    for chunk in (0..100_000).collect::<Vec<usize>>().chunks(batch_size) {
+        let mut query_builder: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "INSERT INTO all_movies (id, title, year, director, cast_actors, synopsis, rating, poster_path) "
         );
+        
+        query_builder.push_values(chunk, |mut b, i| {
+            let adj = adjectives[*i % 20];
+            let noun = nouns[(*i / 20) % 20];
+            let suf = suffixes[(*i / 400) % 20];
+            let md = modifiers[(*i / 8000) % 20];
 
-        let rating = 7.5 + ((i % 25) as f64) * 0.1;
-        let poster = posters[i % 10];
+            let title = format!("{} {} {} {}", adj, noun, suf, md);
+            let id = format!("am_{:05}", *i);
+            let year = 1930 + (*i % 97) as i32;
+            let director = directors[(*i / 3) % 20];
+            
+            let act1 = actors[(*i / 7) % 20];
+            let act2 = actors[(*i / 11) % 20];
+            let cast_actors = format!("{}, {}", act1, act2);
 
-        sqlx::query(
-            "INSERT INTO all_movies (id, title, year, director, cast_actors, synopsis, rating, poster_path) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-        )
-        .bind(id)
-        .bind(title)
-        .bind(year)
-        .bind(director)
-        .bind(cast_actors)
-        .bind(synopsis)
-        .bind(rating)
-        .bind(poster)
-        .execute(&mut *tx)
-        .await?;
+            let synopsis = format!(
+                "An outstanding worldwide masterpiece directed by {} telling a deep story about {} {} in relation to the legendary {} {}.",
+                director, adj.to_lowercase(), noun.to_lowercase(), suf.to_lowercase(), md.to_lowercase()
+            );
+
+            let rating = 7.5 + ((*i % 25) as f64) * 0.1;
+            let poster = posters[*i % 10];
+
+            b.push(id)
+             .push(title)
+             .push(year)
+             .push(director)
+             .push(cast_actors)
+             .push(synopsis)
+             .push(rating)
+             .push(poster);
+        });
+
+        let query = query_builder.build();
+        query.execute(&mut *tx).await?;
     }
 
     tx.commit().await?;

@@ -44,6 +44,14 @@ pub fn urlencode(s: &str) -> String {
     }).collect()
 }
 
+fn get_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("SzklanaSkryznka/1.0")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 fn strip_html(html: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;
@@ -65,7 +73,7 @@ fn strip_html(html: &str) -> String {
 }
 
 async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<OnlineMetadata> {
-    let client = reqwest::Client::new();
+    let client = get_http_client();
     let query_url = format!(
         "https://api.tvmaze.com/singlesearch/shows?q={}&embed=cast",
         urlencode(title)
@@ -136,10 +144,7 @@ async fn fetch_tvmaze_metadata(title: &str, _year: Option<i32>) -> Option<Online
 }
 
 async fn fetch_jikan_metadata(title: &str, _year: Option<i32>) -> Option<OnlineMetadata> {
-    let client = reqwest::Client::builder()
-        .user_agent("SzklanaSkryznka/0.1.0")
-        .build()
-        .ok()?;
+    let client = get_http_client();
         
     let query_url = format!(
         "https://api.jikan.moe/v4/anime?q={}&limit=1",
@@ -244,7 +249,7 @@ pub async fn download_poster_locally(app: &tauri::AppHandle, remote_path: &str) 
     info!("Downloading remote poster: {} -> {:?}", url, destination_path);
 
     // Fetch and write the file
-    let client = reqwest::Client::new();
+    let client = get_http_client();
     if let Ok(res) = client.get(&url).send().await {
         if let Ok(bytes) = res.bytes().await {
             if std::fs::write(&destination_path, bytes).is_ok() {
@@ -261,7 +266,7 @@ pub async fn fetch_omdb_ratings(
     year: Option<i32>,
     api_key: &str,
 ) -> Option<(Option<String>, Option<String>, Option<String>)> {
-    let client = reqwest::Client::new();
+    let client = get_http_client();
     let mut req = client.get("https://www.omdbapi.com/")
         .query(&[("apikey", api_key), ("t", title)]);
         
@@ -344,10 +349,7 @@ async fn fetch_raw_online_metadata(
     if let Some(key) = api_key {
         let key_trimmed = key.trim();
         if !key_trimmed.is_empty() {
-            let client = reqwest::Client::builder()
-                .user_agent("SzklanaSkryznka/1.0")
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
+            let client = get_http_client();
             
             let query_type = if media_type == "TVShow" || media_type == "Episode" || media_type == "Anime" { "tv" } else { "movie" };
             let year_param = if let Some(y) = year {
@@ -702,7 +704,7 @@ pub struct ExtractedFileMetadata {
 }
 
 /// Extract media metadata and perform video/audio telemetry analysis using ffprobe
-pub fn extract_metadata(path: &Path) -> ExtractedFileMetadata {
+pub async fn extract_metadata(path: &Path) -> ExtractedFileMetadata {
     let mut duration = 300;
     let mut resolution = "1080p".to_string();
     let mut video_codec = "h264".to_string();
@@ -723,7 +725,7 @@ pub fn extract_metadata(path: &Path) -> ExtractedFileMetadata {
     let path_str = path.to_string_lossy();
     
     // Execute ffprobe via the media_engine module
-    let parsed_res = crate::media_engine::run_ffprobe_json(&path_str);
+    let parsed_res = crate::media_engine::run_ffprobe_json(&path_str).await;
 
     if let Ok(parsed) = parsed_res {
                     // Extract duration

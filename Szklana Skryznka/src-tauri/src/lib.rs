@@ -12,7 +12,7 @@ use tauri::Listener;
 use tauri::menu::{Menu, MenuItem, Submenu, CheckMenuItem};
 
 pub struct RecentHistory {
-    pub items: std::sync::Mutex<Vec<(String, String)>>,
+    pub items: tokio::sync::Mutex<Vec<(String, String)>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -121,7 +121,7 @@ pub fn run() {
                         let file_path: String = row.get("file_path");
                         let path = std::path::Path::new(&file_path);
                         if path.exists() {
-                            let meta = scanner::extract_metadata(path);
+                            let meta = scanner::extract_metadata(path).await;
                             let _ = sqlx::query(
                                 "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
                                  video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
@@ -200,7 +200,7 @@ pub fn run() {
                 let watcher_handle = handle.clone();
                 let watched_path_item_watcher = watched_path_item.clone();
                 tauri::async_runtime::spawn(async move {
-                    use notify::{Watcher, RecursiveMode, EventKind};
+                    use notify::{Watcher, RecursiveMode};
                     use std::collections::HashSet;
 
                     let (tx, rx) = std::sync::mpsc::channel();
@@ -261,6 +261,16 @@ pub fn run() {
                                 watched_paths.remove(&path);
                                 println!("FS Watcher: Unwatched path: {}", path);
                             }
+                        } else {
+                            // Settings were purged or empty, unwatch all paths
+                            let _ = watched_path_item_watcher.set_text("Watched: None");
+                            let to_remove: Vec<String> = watched_paths.iter().cloned().collect();
+                            for path in to_remove {
+                                let std_path = std::path::Path::new(&path);
+                                let _ = watcher.unwatch(std_path);
+                                watched_paths.remove(&path);
+                                println!("FS Watcher: Unwatched path on purge: {}", path);
+                            }
                         }
 
                         // 2. Check for file change events on the channel without blocking too long
@@ -272,9 +282,16 @@ pub fn run() {
                                 Ok(event) => {
                                     // Match any event (Create, Remove, Modify, or Any other changes)
                                     for path in event.paths {
-                                        // Ignore macOS/hidden temporary files starting with '.'
+                                        // Ignore macOS/hidden temporary files starting with '.' or SQLite DB writes
                                         if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                                            if filename.starts_with('.') {
+                                            let fn_lower = filename.to_lowercase();
+                                            if fn_lower.starts_with('.') 
+                                                || fn_lower.contains("szklana_skrzynka.db")
+                                                || fn_lower.ends_with(".db")
+                                                || fn_lower.ends_with(".db-wal")
+                                                || fn_lower.ends_with(".db-shm")
+                                                || fn_lower.ends_with(".db-journal") 
+                                            {
                                                 continue;
                                             }
                                         }
@@ -416,10 +433,8 @@ pub fn run() {
                             // Write mappings to shared RecentHistory state
                             {
                                 let history = worker_handle.state::<RecentHistory>();
-                                let lock_res = history.items.lock();
-                                if let Ok(mut items_guard) = lock_res {
-                                    *items_guard = mappings;
-                                }
+                                let mut items_guard = history.items.lock().await;
+                                *items_guard = mappings;
                             }
                         }
 
@@ -469,7 +484,7 @@ pub fn run() {
 
                                     // Extract metadata
                                     let path = std::path::Path::new(&file_path);
-                                    let meta = scanner::extract_metadata(path);
+                                    let meta = scanner::extract_metadata(path).await;
 
                                     // Calculate initial metadata score
                                     let initial_score = scanner::calculate_quality_score(
@@ -576,10 +591,10 @@ pub fn run() {
 
                                     // Run Phase 1 extraction again to guarantee that any previously missing/stale telemetry columns are fully updated
                                     let path = std::path::Path::new(&file_path);
-                                    let meta = scanner::extract_metadata(path);
+                                    let meta = scanner::extract_metadata(path).await;
 
                                     // Run Phase 2 analysis
-                                    let loudness = crate::media_engine::run_ffmpeg_ebur128(&file_path).ok();
+                                    let loudness = crate::media_engine::run_ffmpeg_ebur128(&file_path).await.ok();
 
                                     let visual_score = evaluate_visual_quality(
                                         &file_path,
@@ -588,7 +603,7 @@ pub fn run() {
                                         &status_item_clone,
                                         &progress_item_clone,
                                         &worker_handle,
-                                    );
+                                    ).await;
 
                                     let vmaf_score = visual_score;
 
@@ -651,6 +666,7 @@ pub fn run() {
 
                                 // Run second-layer deduplication pass AFTER all files in the batch have been processed
                                 let _ = scanner::run_second_layer_deduplication(&worker_pool).await;
+                                let _ = worker_handle.emit("library-updated", ());
 
                                 if let Some(tray) = worker_handle.tray_by_id("main-tray") {
                                     let _ = tray.set_tooltip(Some("Szklana Skryznka: Idle".to_string()));
@@ -664,7 +680,7 @@ pub fn run() {
 
                  handle.manage(pool);
                  handle.manage(RecentHistory {
-                     items: std::sync::Mutex::new(Vec::new()),
+                     items: tokio::sync::Mutex::new(Vec::new()),
                  });
              });
              Ok(())
@@ -699,10 +715,10 @@ pub fn run() {
              } else if event.id() == "recent_1" || event.id() == "recent_2" || event.id() == "recent_3" {
                  let id_str = event.id().0.as_str();
                  let history = app.state::<RecentHistory>();
-                 let item_id = {
-                     let items = history.items.lock().unwrap();
-                     items.iter().find(|(menu_id, _)| menu_id == id_str).map(|(_, item_id)| item_id.clone())
-                 };
+                  let item_id = {
+                      let items = history.items.blocking_lock();
+                      items.iter().find(|(menu_id, _)| menu_id == id_str).map(|(_, item_id)| item_id.clone())
+                  };
 
                  if let Some(item_id) = item_id {
                      if let Some(window) = app.get_webview_window("main") {
@@ -755,7 +771,7 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn evaluate_visual_quality<R: tauri::Runtime>(
+async fn evaluate_visual_quality<R: tauri::Runtime>(
     file_path: &str,
     duration: i32,
     filename: &str,
@@ -800,7 +816,7 @@ fn evaluate_visual_quality<R: tauri::Runtime>(
         });
 
         // Run FFmpeg to parse blur and blocking artifacts for a single frame via media_engine
-        if let Ok(metrics) = crate::media_engine::run_ffmpeg_frame_metrics(file_path, timestamp) {
+        if let Ok(metrics) = crate::media_engine::run_ffmpeg_frame_metrics(file_path, timestamp).await {
             total_blur += metrics.blur;
             total_block += metrics.block;
             count += 1;

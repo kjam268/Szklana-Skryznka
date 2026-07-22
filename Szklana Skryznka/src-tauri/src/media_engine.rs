@@ -1,4 +1,3 @@
-use std::process::Command;
 use serde_json::Value;
 
 pub fn find_ffprobe() -> &'static str {
@@ -15,7 +14,7 @@ pub fn find_ffmpeg() -> &'static str {
     let alt_paths = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "ffmpeg"];
     for p in alt_paths {
         if std::path::Path::new(p).exists() || p == "ffmpeg" {
-            if Command::new(p)
+            if std::process::Command::new(p)
                 .arg("-version")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -34,9 +33,9 @@ pub struct FrameMetrics {
     pub block: f64,
 }
 
-pub fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
+pub async fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
     let exe = find_ffprobe();
-    let output = Command::new(exe)
+    let output = tokio::process::Command::new(exe)
         .args([
             "-v", "error",
             "-show_entries", "format=duration,bit_rate",
@@ -45,6 +44,7 @@ pub fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
             file_path
         ])
         .output()
+        .await
         .map_err(|e| format!("Failed to execute ffprobe: {}", e))?;
 
     if !output.status.success() {
@@ -60,9 +60,9 @@ pub fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
     Ok(parsed)
 }
 
-pub fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result<FrameMetrics, String> {
+pub async fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result<FrameMetrics, String> {
     let exe = find_ffmpeg();
-    let output = Command::new(exe)
+    let output = tokio::process::Command::new(exe)
         .args([
             "-ss", &format!("{:.2}", timestamp),
             "-i", file_path,
@@ -72,6 +72,7 @@ pub fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result<Frame
             "-"
         ])
         .output()
+        .await
         .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;
 
     if !output.status.success() {
@@ -105,9 +106,9 @@ pub fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result<Frame
     Ok(FrameMetrics { blur, block })
 }
 
-pub fn run_ffmpeg_ebur128(file_path: &str) -> Result<f64, String> {
+pub async fn run_ffmpeg_ebur128(file_path: &str) -> Result<f64, String> {
     let exe = find_ffmpeg();
-    let output = Command::new(exe)
+    let output = tokio::process::Command::new(exe)
         .args([
             "-t", "10",
             "-i", file_path,
@@ -116,6 +117,7 @@ pub fn run_ffmpeg_ebur128(file_path: &str) -> Result<f64, String> {
             "-"
         ])
         .output()
+        .await
         .map_err(|e| format!("Failed to execute ffmpeg ebur128: {}", e))?;
     
     let stderr_str = String::from_utf8_lossy(&output.stderr);

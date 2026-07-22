@@ -122,11 +122,52 @@ export const Library: React.FC = () => {
     };
   }, []);
 
+  const areItemDetailsEqual = (a: MediaItemDetails, b: MediaItemDetails): boolean => {
+    if (a.item.id !== b.item.id) return false;
+    if (a.item.title !== b.item.title) return false;
+    if (a.item.original_title !== b.item.original_title) return false;
+    if (a.item.year !== b.item.year) return false;
+    if (a.item.rating !== b.item.rating) return false;
+    if (a.item.runtime !== b.item.runtime) return false;
+    if (a.item.synopsis !== b.item.synopsis) return false;
+    if (a.item.poster_path !== b.item.poster_path) return false;
+    if (a.item.backdrop_path !== b.item.backdrop_path) return false;
+    if (a.item.rt_score !== b.item.rt_score) return false;
+    if (a.item.imdb_score !== b.item.imdb_score) return false;
+
+    if (a.files.length !== b.files.length) return false;
+    for (let i = 0; i < a.files.length; i++) {
+      const fA = a.files[i];
+      const fB = b.files[i];
+      if (fA.id !== fB.id) return false;
+      if (fA.quality_score !== fB.quality_score) return false;
+      if (fA.quality_score_done !== fB.quality_score_done) return false;
+      if (fA.video_codec !== fB.video_codec) return false;
+      if (fA.audio_codec !== fB.audio_codec) return false;
+      if (fA.resolution !== fB.resolution) return false;
+      if (fA.duration !== fB.duration) return false;
+      if (fA.ebur128_loudness !== fB.ebur128_loudness) return false;
+      if (fA.vmaf_score !== fB.vmaf_score) return false;
+    }
+
+    const subALen = a.subtitles?.length || 0;
+    const subBLen = b.subtitles?.length || 0;
+    if (subALen !== subBLen) return false;
+    if (a.subtitles && b.subtitles) {
+      for (let i = 0; i < a.subtitles.length; i++) {
+        if (a.subtitles[i].id !== b.subtitles[i].id) return false;
+        if (a.subtitles[i].language !== b.subtitles[i].language) return false;
+      }
+    }
+
+    return true;
+  };
+
   useEffect(() => {
     if (selectedItem) {
       const updated = items.find((item) => item.item.id === selectedItem.item.id);
       if (updated) {
-        if (JSON.stringify(selectedItem) !== JSON.stringify(updated)) {
+        if (!areItemDetailsEqual(selectedItem, updated)) {
           setSelectedItem(updated);
         }
       } else {
@@ -265,12 +306,24 @@ export const Library: React.FC = () => {
   };
 
   const handleScan = async () => {
-    if (!scanPath) {
-      showToast("Please enter a valid path to scan", "error");
-      return;
+    let path = scanPath;
+    if (!path) {
+      try {
+        const selected = await invoke<string | null>("select_directory");
+        if (selected) {
+          setScanPath(selected);
+          path = selected;
+        } else {
+          return; // user cancelled selection silently
+        }
+      } catch (e) {
+        console.error("Failed to select folder: ", e);
+        showToast("Failed to open directory selection window", "error");
+        return;
+      }
     }
     try {
-      await scanLibrary(scanPath);
+      await scanLibrary(path);
     } catch (e) {
       showToast(`Scan failed: ${e}`, "error");
     }
