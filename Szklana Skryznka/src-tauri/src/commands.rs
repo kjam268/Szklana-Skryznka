@@ -43,6 +43,11 @@ pub async fn scan_library(app: tauri::AppHandle, pool: DbState<'_>, path: String
         .await;
 
     let res = scan_directory(&app, &pool, &path).await;
+
+    // Run second-layer database deduplication immediately after scan!
+    if let Err(e) = crate::scanner::run_second_layer_deduplication(&pool).await {
+        tracing::warn!("Post-scan second-layer deduplication failed: {}", e);
+    }
     
     // Ensure scan_in_progress is set to false on completion or error
     let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('scan_in_progress', 'false')")
@@ -329,6 +334,11 @@ pub async fn save_media(pool: DbState<'_>, details: MediaItemDetails) -> Result<
     // Run automated tag cleaning rules (Shorts / Movie / Animation duration validations)
     let _ = crate::scanner::check_and_clean_tags(&*pool, &details.item.id).await;
  
+    // Run second-layer database deduplication after saving to instantly merge any matching IMDb IDs!
+    if let Err(e) = crate::scanner::run_second_layer_deduplication(&*pool).await {
+        tracing::warn!("Post-save second-layer deduplication failed: {}", e);
+    }
+
     Ok("Media item metadata saved successfully".to_string())
 }
 
@@ -473,6 +483,16 @@ pub async fn update_schedule(
     .map_err(|e| e.to_string())?;
 
     Ok("Schedule entry updated".to_string())
+}
+
+#[tauri::command]
+pub async fn delete_schedule_entry(pool: DbState<'_>, entry_id: String) -> Result<String, String> {
+    sqlx::query("DELETE FROM schedule_entries WHERE id = $1")
+        .bind(&entry_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("Schedule entry deleted successfully".to_string())
 }
 
 #[tauri::command]

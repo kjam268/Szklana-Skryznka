@@ -16,7 +16,8 @@
         "title": "Szklana Skryznka",
         "width": 1024,
         "height": 768,
-        "maximized": true
+        "maximized": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {

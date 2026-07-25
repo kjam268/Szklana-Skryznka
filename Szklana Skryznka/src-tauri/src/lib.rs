@@ -745,6 +745,7 @@ pub fn run() {
             commands::import_subtitle,
             commands::create_schedule,
             commands::update_schedule,
+            commands::delete_schedule_entry,
             commands::apply_template,
             commands::get_current_program,
             commands::get_next_program,
