@@ -167,17 +167,26 @@ export const Grid: React.FC = () => {
     };
   };
 
+  const formatMondayDate = (d: Date) => {
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
+
   return (
     <div className="flex-1 h-screen flex flex-row bg-background text-gray-200 font-mono overflow-hidden relative">
       {/* TIMELINE LIST CONTAINER */}
       <div className="flex-1 flex flex-col justify-between p-6 overflow-hidden">
         {/* Timeline Header Controls */}
         <div className="space-y-4">
-          <div className="flex justify-between items-center border-b border-gray-800 pb-3">
-            <span className="text-sm font-bold tracking-widest text-accent flex items-center space-x-2">
-              <Calendar size={16} className="text-accent" />
-              <span>THE GRID WEEKLY SCHEDULE (MON - MON)</span>
-            </span>
+          <div className="flex justify-between items-end border-b border-gray-800 pb-3">
+            <div className="flex flex-col space-y-1">
+              <span className="text-lg font-extrabold tracking-widest text-accent flex items-center space-x-2">
+                <Calendar size={20} className="text-accent" />
+                <span>THE GRID</span>
+              </span>
+              <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">
+                Weekly schedule: Monday {formatMondayDate(weekDays[0])} - Monday {formatMondayDate(new Date(startOfWeek.getTime() + 7 * 24 * 60 * 60 * 1000))}
+              </span>
+            </div>
             <div className="flex items-center space-x-3">
               <div className="flex items-center space-x-3 bg-gray-950 p-1 border border-gray-900 rounded-lg">
                 <button
@@ -342,6 +351,8 @@ export const Grid: React.FC = () => {
                           activeTimeStr = hour.toString().padStart(2, "0") + ":" + activeMinutes.toString().padStart(2, "0");
                         }
 
+
+
                         return (
                           <div 
                             key={slotIdx}
@@ -373,8 +384,28 @@ export const Grid: React.FC = () => {
                                 showToast("Failed to schedule: No media item ID was dragged", "error");
                                 return;
                               }
+                              
                               // Calculate exact target start date and time including 15-minute slip
-                              const targetTime = new Date(dayStart.getTime() + slotIdx * 30 * 60 * 1000 + (isBottom ? 15 : 0) * 60 * 1000);
+                              let targetTime = new Date(dayStart.getTime() + slotIdx * 30 * 60 * 1000 + (isBottom ? 15 : 0) * 60 * 1000);
+
+                              // Smart conflict auto-resolution:
+                              // If there is an earlier movie on the same day that overlaps with targetTime,
+                              // snap targetTime to the end_time of that earlier movie.
+                              const dayEntriesForDrop = scheduleEntries.filter((details) => {
+                                const entryStart = new Date(details.start_time);
+                                return entryStart >= dayStart && entryStart < dayEnd;
+                              });
+
+                              const overlappingEarlier = dayEntriesForDrop.find((details) => {
+                                const entryStart = new Date(details.start_time);
+                                const entryEnd = new Date(details.end_time);
+                                return entryStart <= targetTime && entryEnd > targetTime;
+                              });
+
+                              if (overlappingEarlier) {
+                                targetTime = new Date(overlappingEarlier.end_time);
+                              }
+
                               try {
                                 await invoke("create_schedule", {
                                   channelId: activeChannelId,
@@ -437,20 +468,20 @@ export const Grid: React.FC = () => {
                         const durationMinutes = (new Date(details.end_time).getTime() - entryStart.getTime()) / (60 * 1000);
                         const heightPx = (durationMinutes / 30) * 64;
                         
-                        const startHour = entryStart.getHours();
+                        const slotHour = (7 + Math.floor(startSlot / 2)) % 24;
                         let cardStyle = "";
                         let deleteBtnStyle = "";
-                        if (startHour >= 7 && startHour < 12) {
-                          cardStyle = "bg-emerald-950 border-emerald-500/40 text-emerald-100 hover:border-emerald-500/80 shadow-[0_0_15px_rgba(16,185,129,0.15)]";
+                        if (slotHour >= 7 && slotHour < 12) {
+                          cardStyle = "bg-emerald-950/75 border-emerald-500/40 text-emerald-100 hover:border-emerald-500/80 shadow-[0_0_15px_rgba(16,185,129,0.15)]";
                           deleteBtnStyle = "hover:bg-emerald-800/50 hover:text-red-400";
-                        } else if (startHour >= 12 && startHour < 17) {
-                          cardStyle = "bg-amber-950 border-amber-500/40 text-amber-100 hover:border-amber-500/80 shadow-[0_0_15px_rgba(245,158,11,0.15)]";
+                        } else if (slotHour >= 12 && slotHour < 17) {
+                          cardStyle = "bg-amber-950/75 border-amber-500/40 text-amber-100 hover:border-amber-500/80 shadow-[0_0_15px_rgba(245,158,11,0.15)]";
                           deleteBtnStyle = "hover:bg-amber-800/50 hover:text-red-400";
-                        } else if (startHour >= 17 && startHour < 22) {
-                          cardStyle = "bg-rose-950 border-rose-500/40 text-rose-100 hover:border-rose-500/80 shadow-[0_0_15px_rgba(244,63,94,0.15)]";
+                        } else if (slotHour >= 17 && slotHour < 22) {
+                          cardStyle = "bg-rose-950/75 border-rose-500/40 text-rose-100 hover:border-rose-500/80 shadow-[0_0_15px_rgba(244,63,94,0.15)]";
                           deleteBtnStyle = "hover:bg-rose-800/50 hover:text-red-400";
                         } else {
-                          cardStyle = "bg-indigo-950 border-indigo-500/40 text-indigo-100 hover:border-indigo-500/80 shadow-[0_0_15px_rgba(99,102,241,0.15)]";
+                          cardStyle = "bg-indigo-950/75 border-indigo-500/40 text-indigo-100 hover:border-indigo-500/80 shadow-[0_0_15px_rgba(99,102,241,0.15)]";
                           deleteBtnStyle = "hover:bg-indigo-800/50 hover:text-red-400";
                         }
 
@@ -517,17 +548,23 @@ export const Grid: React.FC = () => {
                             }`}
                           >
                             {/* Poster thumbnail - enlarged and top-aligned */}
-                            <div className="w-full max-w-[100px] aspect-[2/3] bg-black/40 rounded overflow-hidden mb-1.5 border border-white/5 flex items-center justify-center shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors">
-                              {details.poster_path ? (
+                            {details.poster_path ? (
+                              <div className="w-full max-w-[100px] aspect-[2/3] bg-black/40 rounded overflow-hidden mb-1.5 border border-white/5 flex items-center justify-center shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors">
                                 <img
                                   src={getPosterUrl(details.poster_path)}
                                   alt={details.item_title}
-                                  className="w-full h-full object-cover"
+                                  className="w-full h-full object-contain"
                                 />
-                              ) : (
-                                <Film size={20} className="opacity-40" />
-                              )}
-                            </div>
+                              </div>
+                            ) : (
+                              <div className="w-full max-w-[100px] aspect-[2/3] bg-gradient-to-b from-gray-900 via-gray-950 to-accent/15 rounded overflow-hidden mb-1.5 border border-white/5 flex flex-col items-center justify-between p-2 shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors relative">
+                                <span className="text-[6px] text-accent/60 tracking-widest font-mono font-bold">SZKLANA SKRYZNKA</span>
+                                <Film size={16} className="text-gray-700 my-1 shrink-0" />
+                                <span className="text-[8px] text-gray-400 font-bold leading-tight line-clamp-2 uppercase">
+                                  {details.item_title}
+                                </span>
+                              </div>
+                            )}
 
                             {/* Details text - underneath */}
                             <div className="w-full shrink-0 flex flex-col items-center space-y-1">
@@ -567,8 +604,8 @@ export const Grid: React.FC = () => {
 
       {/* COLLAPSIBLE SIDEBAR DRAWER */}
       <div 
-        className={`bg-panel border-gray-800 flex flex-col justify-between shrink-0 h-full transition-all duration-300 shadow-2xl overflow-hidden ${
-          isDrawerOpen ? "w-96 p-6 border-l opacity-100" : "w-0 p-0 border-l-0 opacity-0 pointer-events-none"
+        className={`absolute right-0 top-0 bottom-0 w-96 bg-panel/85 backdrop-blur-md border-l border-gray-800 flex flex-col justify-between p-6 z-40 transition-all duration-300 shadow-2xl ${
+          isDrawerOpen ? "translate-x-0 opacity-100" : "translate-x-full opacity-0 pointer-events-none"
         }`}
       >
         <div className="flex flex-col h-full justify-between overflow-hidden">
@@ -807,7 +844,6 @@ export const Grid: React.FC = () => {
                   }
 
                   const details = entry;
-                  const isEpisode = details.item.media_type === "Episode";
                   return (
                     <div
                       key={details.item.id}
@@ -824,17 +860,23 @@ export const Grid: React.FC = () => {
                       }}
                       className="p-2 bg-gray-950/60 border border-gray-900 rounded transition-colors text-xs flex items-center space-x-3 hover:border-accent/40 cursor-grab active:cursor-grabbing"
                     >
-                      <div className="w-16 h-24 bg-gray-950 rounded overflow-hidden shrink-0 flex items-center justify-center border border-gray-900 shadow pointer-events-none">
+                      <div className="w-16 h-24 shrink-0 pointer-events-none">
                         {details.item.poster_path ? (
-                          <img
-                            src={getPosterUrl(details.item.poster_path)}
-                            alt={details.item.title}
-                            className="w-full h-full object-cover pointer-events-none"
-                            loading="lazy"
-                          />
+                          <div className="w-full h-full bg-gray-950 rounded overflow-hidden border border-gray-900 shadow flex items-center justify-center">
+                            <img
+                              src={getPosterUrl(details.item.poster_path)}
+                              alt={details.item.title}
+                              className="w-full h-full object-cover pointer-events-none"
+                              loading="lazy"
+                            />
+                          </div>
                         ) : (
-                          <div className="text-gray-700 pointer-events-none">
-                            {isEpisode ? <Film size={24} /> : <Folder size={24} className="text-accent/60" />}
+                          <div className="w-full h-full bg-gradient-to-b from-gray-900 via-gray-950 to-accent/15 rounded overflow-hidden border border-gray-900 shadow flex flex-col items-center justify-between p-1 text-center relative">
+                            <span className="text-[5px] text-accent/50 tracking-widest font-mono font-bold">SZKLANA SKRYZNKA</span>
+                            <Film size={14} className="text-gray-700 my-0.5 shrink-0" />
+                            <span className="text-[6.5px] text-gray-400 font-bold leading-tight line-clamp-2 uppercase">
+                              {details.item.title}
+                            </span>
                           </div>
                         )}
                       </div>
