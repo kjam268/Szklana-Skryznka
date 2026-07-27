@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film, Folder } from "lucide-react";
+import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film } from "lucide-react";
 import { useLibraryStore, useChannelStore, useNotificationStore, MediaItemDetails } from "../store";
 
 export const Grid: React.FC = () => {
@@ -133,6 +133,15 @@ export const Grid: React.FC = () => {
       return path;
     }
     return convertFileSrc(path);
+  };
+
+  const getFallbackPosterUrl = (itemId: string) => {
+    let hash = 0;
+    for (let i = 0; i < itemId.length; i++) {
+      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const index = Math.abs(hash) % 37;
+    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
   };
 
   const getShowName = (title: string) => {
@@ -351,7 +360,14 @@ export const Grid: React.FC = () => {
                           activeTimeStr = hour.toString().padStart(2, "0") + ":" + activeMinutes.toString().padStart(2, "0");
                         }
 
-
+                        const cellStart = new Date(dayStart.getTime() + slotIdx * 30 * 60 * 1000);
+                        const cellEnd = new Date(dayStart.getTime() + (slotIdx + 1) * 30 * 60 * 1000);
+                        const isCovered = dayEntries.some((entry) => {
+                          const entryStart = new Date(entry.start_time);
+                          const durationSec = Math.max(entry.duration, 3960);
+                          const entryEnd = new Date(entryStart.getTime() + durationSec * 1000);
+                          return entryStart < cellEnd && entryEnd > cellStart;
+                        });
 
                         return (
                           <div 
@@ -396,14 +412,17 @@ export const Grid: React.FC = () => {
                                 return entryStart >= dayStart && entryStart < dayEnd;
                               });
 
-                              const overlappingEarlier = dayEntriesForDrop.find((details) => {
+                               const overlappingEarlier = dayEntriesForDrop.find((details) => {
                                 const entryStart = new Date(details.start_time);
-                                const entryEnd = new Date(details.end_time);
+                                const durationSec = Math.max(details.duration, 3960);
+                                const entryEnd = new Date(entryStart.getTime() + durationSec * 1000);
                                 return entryStart <= targetTime && entryEnd > targetTime;
                               });
 
                               if (overlappingEarlier) {
-                                targetTime = new Date(overlappingEarlier.end_time);
+                                const entryStart = new Date(overlappingEarlier.start_time);
+                                const durationSec = Math.max(overlappingEarlier.duration, 3960);
+                                targetTime = new Date(entryStart.getTime() + durationSec * 1000);
                               }
 
                               try {
@@ -421,14 +440,34 @@ export const Grid: React.FC = () => {
                                   await invoke("delete_schedule_entry", { entryId: originId });
                                 }
 
-                                showToast(originId ? "Program moved successfully" : "Program scheduled successfully", "success");
+                                // Check if there is an overlap conflict with the newly scheduled media
+                                const draggedAsset = items.find(x => x.item.id === mediaItemId);
+                                const assetRuntimeSec = Math.max(draggedAsset?.item.runtime || 0, 3960);
+                                const targetEndTime = new Date(targetTime.getTime() + assetRuntimeSec * 1000);
+
+                                const hasConflictAfterDrop = dayEntriesForDrop.some((other) => {
+                                  if (originId && other.id === originId) return false;
+                                  const otherStart = new Date(other.start_time);
+                                  const otherDurationSec = Math.max(other.duration, 3960);
+                                  const otherEnd = new Date(otherStart.getTime() + otherDurationSec * 1000);
+                                  return (targetTime < otherEnd && targetEndTime > otherStart);
+                                });
+
+                                if (hasConflictAfterDrop) {
+                                  showToast(originId ? "Program moved (overlaps with another media)!" : "Program scheduled with overlap conflicts!", "error");
+                                } else {
+                                  showToast(originId ? "Program moved successfully" : "Program scheduled successfully", "success");
+                                }
+
                                 fetchSchedule();
                               } catch (err) {
                                 showToast(`Action failed: ${err}`, "error");
                                 console.error("Move/Schedule insertion failed:", err);
                               }
                             }}
-                            className={`group h-[64px] shrink-0 flex items-center justify-center transition-all duration-200 relative bg-gradient-to-br border-l border-gray-900/20 ${
+                            className={`group h-[64px] shrink-0 flex items-center ${
+                              isCovered ? "justify-start pl-3" : "justify-center"
+                            } transition-all duration-200 relative bg-gradient-to-br border-l border-gray-900/20 ${
                               isHalfHour ? "border-b border-dashed border-gray-800/30" : "border-b border-solid border-gray-800/60"
                             } ${
                               isDraggedOver ? "bg-accent/15 border-accent/60 border z-20 scale-[0.98] shadow-[0_0_12px_rgba(6,182,212,0.3)]" : blockColor
@@ -449,7 +488,11 @@ export const Grid: React.FC = () => {
 
                             <span 
                               className={`select-none font-bold tracking-tighter leading-none transition-all duration-150 z-20 pointer-events-none ${
-                                isDraggedOver ? "text-[20px] text-accent font-bold" : `text-[32px] ${textColor}`
+                                isDraggedOver 
+                                  ? "text-[20px] text-accent font-bold" 
+                                  : (isCovered 
+                                      ? `text-[18px] opacity-40 font-extrabold ${textColor}` 
+                                      : `text-[32px] ${textColor}`)
                               }`}
                               style={{ fontFamily: "'PT Sans', sans-serif" }}
                             >
@@ -465,7 +508,7 @@ export const Grid: React.FC = () => {
                         const startOffsetMs = entryStart.getTime() - dayStart.getTime();
                         const startSlot = startOffsetMs / (30 * 60 * 1000);
                         const topPx = startSlot * 64;
-                        const durationMinutes = (new Date(details.end_time).getTime() - entryStart.getTime()) / (60 * 1000);
+                        const durationMinutes = Math.max((new Date(details.end_time).getTime() - entryStart.getTime()) / (60 * 1000), 66);
                         const heightPx = (durationMinutes / 30) * 64;
                         
                         const slotHour = (7 + Math.floor(startSlot / 2)) % 24;
@@ -490,11 +533,16 @@ export const Grid: React.FC = () => {
                         };
 
                         // Algorithm to calculate overlapping columns (sub-tracks)
+                        // Treat all items as taking at least 66 minutes (3960 seconds) for layout conflict separation
+                        const currentDurationSec = Math.max(details.duration, 3960);
+                        const currentEnd = new Date(entryStart.getTime() + currentDurationSec * 1000);
+
                         const overlaps = dayEntries.filter(other => {
                           if (other.id === details.id) return false;
                           const otherStart = new Date(other.start_time);
-                          const otherEnd = new Date(other.end_time);
-                          return (entryStart < otherEnd && new Date(details.end_time) > otherStart);
+                          const otherDurationSec = Math.max(other.duration, 3960);
+                          const otherEnd = new Date(otherStart.getTime() + otherDurationSec * 1000);
+                          return (entryStart < otherEnd && currentEnd > otherStart);
                         });
 
                         const hasConflict = overlaps.length > 0;
@@ -527,6 +575,7 @@ export const Grid: React.FC = () => {
                               position: "absolute",
                               top: `${topPx}px`,
                               height: `${heightPx}px`,
+                              minHeight: "140px",
                               left: `${leftPercent}%`,
                               right: `${rightPercent}%`,
                               WebkitUserDrag: "element"
@@ -548,23 +597,13 @@ export const Grid: React.FC = () => {
                             }`}
                           >
                             {/* Poster thumbnail - enlarged and top-aligned */}
-                            {details.poster_path ? (
-                              <div className="w-full max-w-[100px] aspect-[2/3] bg-black/40 rounded overflow-hidden mb-1.5 border border-white/5 flex items-center justify-center shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors">
-                                <img
-                                  src={getPosterUrl(details.poster_path)}
-                                  alt={details.item_title}
-                                  className="w-full h-full object-contain"
-                                />
-                              </div>
-                            ) : (
-                              <div className="w-full max-w-[100px] aspect-[2/3] bg-gradient-to-b from-gray-900 via-gray-950 to-accent/15 rounded overflow-hidden mb-1.5 border border-white/5 flex flex-col items-center justify-between p-2 shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors relative">
-                                <span className="text-[6px] text-accent/60 tracking-widest font-mono font-bold">SZKLANA SKRYZNKA</span>
-                                <Film size={16} className="text-gray-700 my-1 shrink-0" />
-                                <span className="text-[8px] text-gray-400 font-bold leading-tight line-clamp-2 uppercase">
-                                  {details.item_title}
-                                </span>
-                              </div>
-                            )}
+                            <div className="w-full max-w-[100px] aspect-[2/3] bg-black/40 rounded overflow-hidden mb-1.5 border border-white/5 flex items-center justify-center shrink min-h-0 shadow-inner group-hover/card:border-white/20 transition-colors">
+                              <img
+                                src={(details.duration !== 0 && details.poster_path) ? getPosterUrl(details.poster_path) : getFallbackPosterUrl(details.media_item_id)}
+                                alt={details.item_title}
+                                className="w-full h-full object-contain"
+                              />
+                            </div>
 
                             {/* Details text - underneath */}
                             <div className="w-full shrink-0 flex flex-col items-center space-y-1">
@@ -573,6 +612,9 @@ export const Grid: React.FC = () => {
                               </span>
                               <span className="text-[8.5px] text-gray-400 font-mono block leading-none">
                                 {formatTimeStr(entryStart)} - {formatTimeStr(new Date(details.end_time))}
+                              </span>
+                              <span className="text-[8.5px] text-gray-300 font-mono block leading-none font-bold">
+                                {formatRuntime(details.duration)}
                               </span>
                               <span className="text-[7.5px] uppercase tracking-wider bg-black/40 px-1.5 py-0.5 rounded font-bold text-accent/80 font-mono">
                                 {details.media_type}
@@ -721,18 +763,12 @@ export const Grid: React.FC = () => {
                               className="p-2 bg-gray-950/60 border border-gray-900 rounded transition-colors text-xs flex items-center space-x-3 hover:border-accent/40 cursor-grab active:cursor-grabbing"
                             >
                               <div className="w-16 h-24 bg-gray-950 rounded overflow-hidden shrink-0 flex items-center justify-center border border-gray-900 shadow pointer-events-none">
-                                {details.item.poster_path ? (
-                                  <img
-                                    src={getPosterUrl(details.item.poster_path)}
-                                    alt={details.item.title}
-                                    className="w-full h-full object-cover pointer-events-none"
-                                    loading="lazy"
-                                  />
-                                ) : (
-                                  <div className="text-gray-700 pointer-events-none">
-                                    <Film size={24} />
-                                  </div>
-                                )}
+                                <img
+                                  src={details.item.poster_path ? getPosterUrl(details.item.poster_path) : getFallbackPosterUrl(details.item.id)}
+                                  alt={details.item.title}
+                                  className="w-full h-full object-cover pointer-events-none"
+                                  loading="lazy"
+                                />
                               </div>
                               <div className="min-w-0 flex-1 flex flex-col justify-center space-y-0.5 pointer-events-none">
                                 <div className="text-[10px] text-gray-400 font-bold truncate pointer-events-none">
@@ -820,18 +856,12 @@ export const Grid: React.FC = () => {
                         className="p-2 bg-gray-950/60 border border-gray-900 rounded transition-colors text-xs flex items-center space-x-3 hover:border-accent/40 cursor-pointer"
                       >
                         <div className="w-16 h-24 bg-gray-950 rounded overflow-hidden shrink-0 flex items-center justify-center border border-gray-900 shadow">
-                          {posterPath ? (
-                            <img
-                              src={getPosterUrl(posterPath)}
-                              alt={entry.showName}
-                              className="w-full h-full object-cover"
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="text-gray-700">
-                              <Folder size={24} className="text-accent/60" />
-                            </div>
-                          )}
+                          <img
+                            src={posterPath ? getPosterUrl(posterPath) : getFallbackPosterUrl(entry.showName)}
+                            alt={entry.showName}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                          />
                         </div>
                         <div className="truncate min-w-0 flex-1">
                           <div className="font-bold truncate text-gray-300">{entry.showName}</div>
@@ -860,25 +890,13 @@ export const Grid: React.FC = () => {
                       }}
                       className="p-2 bg-gray-950/60 border border-gray-900 rounded transition-colors text-xs flex items-center space-x-3 hover:border-accent/40 cursor-grab active:cursor-grabbing"
                     >
-                      <div className="w-16 h-24 shrink-0 pointer-events-none">
-                        {details.item.poster_path ? (
-                          <div className="w-full h-full bg-gray-950 rounded overflow-hidden border border-gray-900 shadow flex items-center justify-center">
-                            <img
-                              src={getPosterUrl(details.item.poster_path)}
-                              alt={details.item.title}
-                              className="w-full h-full object-cover pointer-events-none"
-                              loading="lazy"
-                            />
-                          </div>
-                        ) : (
-                          <div className="w-full h-full bg-gradient-to-b from-gray-900 via-gray-950 to-accent/15 rounded overflow-hidden border border-gray-900 shadow flex flex-col items-center justify-between p-1 text-center relative">
-                            <span className="text-[5px] text-accent/50 tracking-widest font-mono font-bold">SZKLANA SKRYZNKA</span>
-                            <Film size={14} className="text-gray-700 my-0.5 shrink-0" />
-                            <span className="text-[6.5px] text-gray-400 font-bold leading-tight line-clamp-2 uppercase">
-                              {details.item.title}
-                            </span>
-                          </div>
-                        )}
+                      <div className="w-16 h-24 bg-gray-950 rounded overflow-hidden shrink-0 flex items-center justify-center border border-gray-900 shadow pointer-events-none">
+                        <img
+                          src={details.item.poster_path ? getPosterUrl(details.item.poster_path) : getFallbackPosterUrl(details.item.id)}
+                          alt={details.item.title}
+                          className="w-full h-full object-cover pointer-events-none"
+                          loading="lazy"
+                        />
                       </div>
                       <div className="truncate min-w-0 flex-1 pointer-events-none">
                         <div className="font-bold truncate text-gray-300 pointer-events-none">{details.item.title}</div>

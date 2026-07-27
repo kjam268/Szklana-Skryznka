@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useChannelStore, usePlayerStore, ScheduleEntryDetails } from "../store";
-import { Play, Volume2, Maximize2, Tv, Clock, Eye, AlertTriangle } from "lucide-react";
+import { Play, Volume2, Maximize2, Clock, Eye, AlertTriangle } from "lucide-react";
 
 export const OnAir: React.FC = () => {
   const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
@@ -13,6 +13,15 @@ export const OnAir: React.FC = () => {
       return path;
     }
     return convertFileSrc(path);
+  };
+
+  const getFallbackPosterUrl = (itemId: string) => {
+    let hash = 0;
+    for (let i = 0; i < itemId.length; i++) {
+      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const index = Math.abs(hash) % 37;
+    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
   };
   
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -177,17 +186,11 @@ export const OnAir: React.FC = () => {
           <div className="absolute top-2 right-4 text-[9px] text-gray-600">INSPECT BLOCK</div>
           {hoveredItem ? (
             <div className="flex items-center space-x-4 w-full">
-              {hoveredItem.poster_path ? (
-                <img 
-                  src={getPosterUrl(hoveredItem.poster_path)} 
-                  alt="Poster" 
-                  className="w-16 h-24 object-cover rounded border border-gray-700 bg-gray-900"
-                />
-              ) : (
-                <div className="w-16 h-24 bg-gray-900 border border-gray-800 flex items-center justify-center rounded text-gray-600">
-                  <Tv size={20} />
-                </div>
-              )}
+              <img 
+                src={(hoveredItem.duration !== 0 && hoveredItem.poster_path) ? getPosterUrl(hoveredItem.poster_path) : getFallbackPosterUrl(hoveredItem.media_item_id)} 
+                alt="Poster" 
+                className="w-16 h-24 object-cover rounded border border-gray-700 bg-gray-900"
+              />
               <div className="flex-1 space-y-1">
                 <div className="text-sm font-bold text-accent">{hoveredItem.item_title}</div>
                 <p className="text-[10px] text-gray-400 line-clamp-3 leading-relaxed">

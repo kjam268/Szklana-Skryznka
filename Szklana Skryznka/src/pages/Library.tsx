@@ -419,6 +419,15 @@ export const Library: React.FC = () => {
     return convertFileSrc(path);
   };
 
+  const getFallbackPosterUrl = (itemId: string) => {
+    let hash = 0;
+    for (let i = 0; i < itemId.length; i++) {
+      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const index = Math.abs(hash) % 37;
+    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
+  };
+
   return (
     <div className="flex-1 h-screen flex bg-background text-gray-200 font-mono overflow-hidden relative">
       {/* MAIN CONTAINER */}
@@ -599,28 +608,26 @@ export const Library: React.FC = () => {
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
                       {seasonEpisodes.map((details) => {
                         const isSelected = selectedItem?.item.id === details.item.id;
+                        const isZeroDuration = details.item.runtime === 0;
                         return (
                           <div
-                            key={details.item.id}
-                            onClick={() => handleSelectCard(details)}
-                            className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
-                              isSelected ? "border-accent cyan-glow" : "border-gray-800 hover:border-gray-600"
-                            }`}
-                          >
-                            <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                              {details.item.poster_path ? (
+                              key={details.item.id}
+                              onClick={() => handleSelectCard(details)}
+                              className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
+                                isSelected 
+                                  ? "border-accent cyan-glow" 
+                                  : (isZeroDuration 
+                                      ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
+                                      : "border-gray-800 hover:border-gray-600")
+                              }`}
+                            >
+                              <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
                                 <img
-                                  src={getPosterUrl(details.item.poster_path)}
+                                  src={(!isZeroDuration && details.item.poster_path) ? getPosterUrl(details.item.poster_path) : getFallbackPosterUrl(details.item.id)}
                                   alt={details.item.title}
                                   className="w-full h-full object-cover"
                                   loading="lazy"
                                 />
-                              ) : (
-                                <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                                  <Film size={32} />
-                                  <span className="text-[10px] text-gray-500">NO ART</span>
-                                </div>
-                              )}
                               
                               {/* Classic Film Toggle Overlay (Top Right) */}
                               <button
@@ -707,6 +714,11 @@ export const Library: React.FC = () => {
 
                               {/* Overlaid Tag Badges (Top Left) */}
                               <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
+                                {isZeroDuration && (
+                                  <div className="text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase bg-red-600/90 text-white border border-red-400/20 shadow-md">
+                                    0 DURATION
+                                  </div>
+                                )}
                                 {details.tags && details.tags.map((tag) => {
                                   if (tag === "Favorites") return null;
                                   let tagStyle = "bg-accent/90 text-white border border-accent/20";
@@ -770,7 +782,7 @@ export const Library: React.FC = () => {
                                     </div>
                                   )}
                                 </div>
-                                <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
+                                <span className={`text-[8.5px] font-mono tracking-tighter bg-gray-950 px-1 py-0.5 rounded border shrink-0 ${isZeroDuration ? "text-red-400 border-red-950/50 font-bold shadow-[0_0_8px_rgba(239,68,68,0.25)]" : "text-gray-400 border-gray-900"}`}>{formatRuntime(details.item.runtime)}</span>
                               </div>
                             </div>
                           </div>
@@ -798,7 +810,8 @@ export const Library: React.FC = () => {
                   <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 py-2">
                     {seasonNums.map((sNum) => {
                       const seasonGroup = groupedSeasons[sNum];
-                      const posterItem = seasonGroup.find(item => item.item.poster_path) || seasonGroup[0];
+                      const posterItem = seasonGroup.find(item => item.item.poster_path && item.item.runtime > 0) || seasonGroup.find(item => item.item.poster_path) || seasonGroup[0];
+                      const isZeroDuration = seasonGroup.every(item => item.item.runtime === 0);
                       
                       return (
                         <div
@@ -807,19 +820,12 @@ export const Library: React.FC = () => {
                           className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
                         >
                           <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                            {posterItem.item.poster_path ? (
-                              <img
-                                src={getPosterUrl(posterItem.item.poster_path)}
-                                alt={`Season ${sNum}`}
-                                className="w-full h-full object-cover"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                                <Film size={32} />
-                                <span className="text-[10px] text-gray-500">NO ART</span>
-                              </div>
-                            )}
+                            <img
+                              src={(!isZeroDuration && posterItem.item.poster_path) ? getPosterUrl(posterItem.item.poster_path) : getFallbackPosterUrl(posterItem.item.id)}
+                              alt={`Season ${sNum}`}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
                              <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
                                SEASON {sNum}
                              </div>
@@ -955,8 +961,9 @@ export const Library: React.FC = () => {
                   {showNames.map((showName) => {
                     const group = groupedShows[showName];
                     const firstItem = group[0];
-                    const posterItem = group.find(item => item.item.poster_path);
-                    const posterPath = posterItem ? posterItem.item.poster_path : firstItem.item.poster_path;
+                    const posterItem = group.find(item => item.item.poster_path && item.item.runtime > 0) || group.find(item => item.item.poster_path) || firstItem;
+                    const posterPath = posterItem ? posterItem.item.poster_path : undefined;
+                    const isZeroDuration = group.every(item => item.item.runtime === 0);
                     
                     return (
                       <div
@@ -965,19 +972,12 @@ export const Library: React.FC = () => {
                         className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
                       >
                         <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                          {posterPath ? (
-                            <img
-                              src={getPosterUrl(posterPath)}
-                              alt={showName}
-                              className="w-full h-full object-cover"
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                              <Film size={32} />
-                              <span className="text-[10px] text-gray-500">NO ART</span>
-                            </div>
-                          )}
+                          <img
+                            src={(!isZeroDuration && posterPath) ? getPosterUrl(posterPath) : getFallbackPosterUrl(showName)}
+                            alt={showName}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                          />
                           <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
                             TV SHOW
                           </div>
@@ -1175,8 +1175,9 @@ export const Library: React.FC = () => {
                       // Render TV Show Folder Card in "All" view
                       const group = entry.episodes;
                       const firstItem = group[0];
-                      const posterItem = group.find(item => item.item.poster_path);
-                      const posterPath = posterItem ? posterItem.item.poster_path : firstItem.item.poster_path;
+                      const posterItem = group.find(item => item.item.poster_path && item.item.runtime > 0) || group.find(item => item.item.poster_path) || firstItem;
+                      const posterPath = posterItem ? posterItem.item.poster_path : undefined;
+                      const isZeroDuration = group.every(item => item.item.runtime === 0);
 
                       return (
                         <div
@@ -1185,19 +1186,12 @@ export const Library: React.FC = () => {
                           className="bg-panel border border-gray-800 hover:border-accent/40 rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg"
                         >
                           <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                            {posterPath ? (
-                              <img
-                                src={getPosterUrl(posterPath)}
-                                alt={entry.showName}
-                                className="w-full h-full object-cover"
-                                loading="lazy"
-                              />
-                            ) : (
-                              <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                                <Film size={32} />
-                                <span className="text-[10px] text-gray-500">NO ART</span>
-                              </div>
-                            )}
+                            <img
+                              src={(!isZeroDuration && posterPath) ? getPosterUrl(posterPath) : getFallbackPosterUrl(entry.showName)}
+                              alt={entry.showName}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                            />
                             <div className="absolute top-2 left-2 text-[9px] bg-accent/80 px-1.5 py-0.5 rounded text-background tracking-wider font-extrabold shadow border border-accent/20">
                               TV SHOW
                             </div>
@@ -1285,28 +1279,26 @@ export const Library: React.FC = () => {
                     // Render Standard card (e.g. Movies, Bumpers)
                     const details = entry;
                     const isSelected = selectedItem?.item.id === details.item.id;
+                    const isZeroDuration = details.item.runtime === 0;
                     return (
                       <div
                         key={details.item.id}
                         onClick={() => handleSelectCard(details)}
                         className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
-                          isSelected ? "border-accent cyan-glow" : "border-gray-800 hover:border-gray-600"
+                          isSelected 
+                            ? "border-accent cyan-glow" 
+                            : (isZeroDuration 
+                                ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
+                                : "border-gray-800 hover:border-gray-600")
                         }`}
                       >
                         <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
-                          {details.item.poster_path ? (
-                            <img
-                              src={getPosterUrl(details.item.poster_path)}
-                              alt={details.item.title}
-                              className="w-full h-full object-cover"
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center justify-center text-gray-700 space-y-1">
-                              <Film size={32} />
-                              <span className="text-[10px] text-gray-500">NO ART</span>
-                            </div>
-                          )}
+                          <img
+                            src={(!isZeroDuration && details.item.poster_path) ? getPosterUrl(details.item.poster_path) : getFallbackPosterUrl(details.item.id)}
+                            alt={details.item.title}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                          />
                           
                           {/* Classic Film Toggle Overlay (Top Right) */}
                           <button
@@ -1393,6 +1385,11 @@ export const Library: React.FC = () => {
 
                           {/* Overlaid Tag Badges (Top Left) */}
                           <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
+                            {isZeroDuration && (
+                              <div className="text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase bg-red-600/90 text-white border border-red-400/20 shadow-md">
+                                0 DURATION
+                              </div>
+                            )}
                             {details.tags && details.tags.map((tag) => {
                               if (tag === "Favorites") return null;
                               let tagStyle = "bg-accent/90 text-white border border-accent/20";
@@ -1456,7 +1453,7 @@ export const Library: React.FC = () => {
                                 </div>
                               )}
                             </div>
-                            <span className="text-[8.5px] font-mono tracking-tighter text-gray-400 bg-gray-950 px-1 py-0.5 rounded border border-gray-900 shrink-0">{formatRuntime(details.item.runtime)}</span>
+                            <span className={`text-[8.5px] font-mono tracking-tighter bg-gray-950 px-1 py-0.5 rounded border shrink-0 ${isZeroDuration ? "text-red-400 border-red-950/50 font-bold shadow-[0_0_8px_rgba(239,68,68,0.25)]" : "text-gray-400 border-gray-900"}`}>{formatRuntime(details.item.runtime)}</span>
                           </div>
                         </div>
                       </div>
