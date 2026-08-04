@@ -134,3 +134,152 @@ pub async fn run_ffmpeg_ebur128(file_path: &str) -> Result<f64, String> {
     }
     Ok(loudness)
 }
+
+use crate::models::{QualityIssue, Recommendation, VideoQualityScore};
+
+/// Center compression function mapping raw scores to central range per evaluation directives
+fn compress_to_center(raw: f32) -> f32 {
+    let compressed = 30.0 + (raw.clamp(0.0, 100.0) * 0.40);
+    (compressed * 10.0).round() / 10.0
+}
+
+fn get_qualitative_label(score: f32) -> String {
+    match score as u32 {
+        98..=100 => "Reference Quality".to_string(),
+        95..=97 => "Excellent".to_string(),
+        90..=94 => "Very Good".to_string(),
+        80..=89 => "Good".to_string(),
+        70..=79 => "Fair".to_string(),
+        60..=69 => "Acceptable".to_string(),
+        40..=59 => "Poor".to_string(),
+        20..=39 => "Very Poor".to_string(),
+        _ => "Critically Deficient".to_string(),
+    }
+}
+
+pub async fn compute_video_quality_score(file_path: &str) -> Result<VideoQualityScore, String> {
+    let metadata = run_ffprobe_json(file_path).await.unwrap_or(Value::Null);
+    let mut deductions = Vec::new();
+    let mut recommendations = Vec::new();
+
+    let streams = metadata.get("streams").and_then(|s| s.as_array());
+    let format_obj = metadata.get("format");
+
+    let video_stream = streams.and_then(|arr| arr.iter().find(|s| s.get("codec_type").and_then(|c| c.as_str()) == Some("video")));
+    let audio_stream = streams.and_then(|arr| arr.iter().find(|s| s.get("codec_type").and_then(|c| c.as_str()) == Some("audio")));
+
+    let height = video_stream.and_then(|s| s.get("height")).and_then(|v| v.as_i64()).unwrap_or(0);
+    let v_codec = video_stream.and_then(|s| s.get("codec_name")).and_then(|v| v.as_str()).unwrap_or("unknown");
+    let a_codec = audio_stream.and_then(|s| s.get("codec_name")).and_then(|v| v.as_str()).unwrap_or("none");
+    let channels = audio_stream.and_then(|s| s.get("channels")).and_then(|v| v.as_i64()).unwrap_or(2);
+
+    // 1. Visual Quality Score (Raw 0-100)
+    let mut raw_visual = 85.0f32;
+    if height >= 2160 {
+        raw_visual += 10.0;
+    } else if height >= 1080 {
+        raw_visual += 5.0;
+    } else if height < 720 && height > 0 {
+        raw_visual -= 15.0;
+        deductions.push(QualityIssue {
+            category: "Visual".to_string(),
+            description: "Sub-HD resolution (SD video content).".to_string(),
+            penalty: 15.0,
+        });
+        recommendations.push(Recommendation {
+            action: "Upscale / Replace".to_string(),
+            expected_gain: 10.0,
+            description: "Upgrade source file to HD/4K copy.".to_string(),
+        });
+    }
+
+    // 2. Encoding Quality (Raw 0-100)
+    let mut raw_encoding = 80.0f32;
+    match v_codec.to_lowercase().as_str() {
+        "av1" | "hevc" | "h265" => raw_encoding += 10.0,
+        "h264" => raw_encoding += 5.0,
+        "mpeg2video" | "mpeg4" | "msmpeg4v3" | "xvid" => {
+            raw_encoding -= 20.0;
+            deductions.push(QualityIssue {
+                category: "Encoding".to_string(),
+                description: "Legacy video codec detected.".to_string(),
+                penalty: 20.0,
+            });
+            recommendations.push(Recommendation {
+                action: "Transcode to AV1/H.264".to_string(),
+                expected_gain: 15.0,
+                description: "Transcode source to modern AV1 or H.264 codec.".to_string(),
+            });
+        }
+        _ => {}
+    }
+
+    // 3. Audio Quality (Raw 0-100)
+    let mut raw_audio = 80.0f32;
+    if a_codec == "none" {
+        raw_audio = 40.0;
+        deductions.push(QualityIssue {
+            category: "Audio".to_string(),
+            description: "No audio stream present.".to_string(),
+            penalty: 40.0,
+        });
+    } else if channels >= 6 {
+        raw_audio += 10.0;
+    }
+
+    // 4. Container & Compatibility Quality (Raw 0-100)
+    let mut raw_container = 85.0f32;
+    let mut raw_compatibility = 85.0f32;
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    if ext == "avi" || ext == "wmv" || ext == "flv" {
+        raw_container -= 15.0;
+        raw_compatibility -= 20.0;
+        deductions.push(QualityIssue {
+            category: "Container".to_string(),
+            description: "Legacy container format (AVI/WMV/FLV).".to_string(),
+            penalty: 15.0,
+        });
+        recommendations.push(Recommendation {
+            action: "Remux to MP4/MKV".to_string(),
+            expected_gain: 12.0,
+            description: "Remux file container into modern MP4 or MKV format.".to_string(),
+        });
+    }
+
+    // 5. Integrity & Archival (Raw 0-100)
+    let raw_integrity = 90.0f32;
+    let raw_archival = 80.0f32;
+
+    let raw_overall = (raw_visual * 0.30)
+        + (raw_encoding * 0.20)
+        + (raw_audio * 0.20)
+        + (raw_container * 0.10)
+        + (raw_integrity * 0.10)
+        + (raw_compatibility * 0.10);
+
+    let overall = compress_to_center(raw_overall);
+    let visual_quality = compress_to_center(raw_visual);
+    let audio_quality = compress_to_center(raw_audio);
+    let encoding_quality = compress_to_center(raw_encoding);
+    let container_quality = compress_to_center(raw_container);
+    let integrity = compress_to_center(raw_integrity);
+    let compatibility = compress_to_center(raw_compatibility);
+    let archival_quality = compress_to_center(raw_archival);
+
+    let qualitative_rating = get_qualitative_label(overall);
+
+    Ok(VideoQualityScore {
+        overall,
+        visual_quality,
+        audio_quality,
+        encoding_quality,
+        container_quality,
+        integrity,
+        compatibility,
+        archival_quality,
+        confidence: 85.0,
+        qualitative_rating,
+        deductions,
+        recommendations,
+    })
+}

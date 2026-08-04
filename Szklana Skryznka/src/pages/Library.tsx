@@ -28,6 +28,7 @@ export const Library: React.FC = () => {
     estimated_savings_pct: number;
     file_size_gb: number;
   } | null>(null);
+  const [vqsDetails, setVqsDetails] = useState<any | null>(null);
   const [av1Transcoding, setAv1Transcoding] = useState(false);
   const [av1ProgressMsg, setAv1ProgressMsg] = useState("");
 
@@ -124,8 +125,13 @@ export const Library: React.FC = () => {
       invoke("evaluate_av1_candidate", { filePath: selectedItem.files[0].file_path })
         .then((res: any) => setAv1Eval(res))
         .catch((err) => console.warn("AV1 eval error:", err));
+
+      invoke("get_video_quality_score", { filePath: selectedItem.files[0].file_path })
+        .then((res: any) => setVqsDetails(res))
+        .catch((err) => console.warn("VQS eval error:", err));
     } else {
       setAv1Eval(null);
+      setVqsDetails(null);
     }
   }, [selectedItem?.item?.id]);
 
@@ -1826,6 +1832,60 @@ export const Library: React.FC = () => {
                           {selectedItem.files[0].embedded_subtitles || "None"}
                         </span>
                       </div>
+
+                      {/* DETAILED VQS ANALYSIS BREAKDOWN */}
+                      {vqsDetails && (
+                        <div className="mt-3 p-3 rounded-lg border bg-gray-950/90 border-amber-500/20 font-mono text-[10px] space-y-2.5 shadow-xl">
+                          <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+                            <div className="flex items-center space-x-1.5 font-bold text-amber-400">
+                              <Crown size={12} className="fill-current text-amber-400" />
+                              <span>VIDEO QUALITY SCORE (VQS)</span>
+                            </div>
+                            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-extrabold border border-amber-500/40">
+                              {vqsDetails.overall.toFixed(1)} / 100 ({vqsDetails.qualitative_rating})
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-1.5 text-[9px] pt-1">
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Visual Quality:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.visual_quality}</span>
+                            </div>
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Encoding:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.encoding_quality}</span>
+                            </div>
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Audio Quality:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.audio_quality}</span>
+                            </div>
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Container:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.container_quality}</span>
+                            </div>
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Integrity:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.integrity}</span>
+                            </div>
+                            <div className="flex justify-between bg-gray-900/60 p-1.5 rounded">
+                              <span className="text-gray-500">Compatibility:</span>
+                              <span className="text-gray-200 font-bold">{vqsDetails.compatibility}</span>
+                            </div>
+                          </div>
+
+                          {vqsDetails.deductions && vqsDetails.deductions.length > 0 && (
+                            <div className="space-y-1 border-t border-gray-900 pt-2">
+                              <div className="text-rose-400 font-bold text-[9px]">DETECTED DEDUCTIONS:</div>
+                              {vqsDetails.deductions.map((issue: any, idx: number) => (
+                                <div key={idx} className="text-rose-300/80 text-[8.5px] leading-tight flex justify-between">
+                                  <span>• [{issue.category}] {issue.description}</span>
+                                  <span className="font-bold text-rose-400">-{issue.penalty}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* AV1 OPTIMIZATION CARD & BUTTON */}

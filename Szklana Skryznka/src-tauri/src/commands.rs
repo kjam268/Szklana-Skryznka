@@ -1965,6 +1965,11 @@ pub struct Av1CandidateDetails {
 }
 
 #[tauri::command]
+pub async fn get_video_quality_score(file_path: String) -> Result<crate::models::VideoQualityScore, String> {
+    crate::media_engine::compute_video_quality_score(&file_path).await
+}
+
+#[tauri::command]
 pub async fn evaluate_av1_candidate(file_path: String) -> Result<Av1CandidateDetails, String> {
     let path = std::path::Path::new(&file_path);
     if !path.exists() {

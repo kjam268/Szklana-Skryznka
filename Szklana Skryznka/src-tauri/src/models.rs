@@ -202,3 +202,33 @@ pub struct DiagnosticsReport {
     pub duplicate_files: Vec<String>,
     pub duplicate_metadata: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityIssue {
+    pub category: String,
+    pub description: String,
+    pub penalty: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Recommendation {
+    pub action: String,
+    pub expected_gain: f32,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoQualityScore {
+    pub overall: f32,                  // 0.0–100.0 (compressed toward central range)
+    pub visual_quality: f32,
+    pub audio_quality: f32,
+    pub encoding_quality: f32,
+    pub container_quality: f32,
+    pub integrity: f32,
+    pub compatibility: f32,
+    pub archival_quality: f32,
+    pub confidence: f32,
+    pub qualitative_rating: String,
+    pub deductions: Vec<QualityIssue>,
+    pub recommendations: Vec<Recommendation>,
+}

@@ -821,7 +821,8 @@ pub fn run() {
             commands::open_tv_window,
             commands::open_in_vlc_app,
             commands::evaluate_av1_candidate,
-            commands::transcode_to_av1
+            commands::transcode_to_av1,
+            commands::get_video_quality_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
