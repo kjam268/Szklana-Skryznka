@@ -177,6 +177,9 @@ pub struct ScheduleEntryDetails {
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
     pub file_path: Option<String>,
+    pub audio_tracks: Option<String>,
+    pub audio_language: Option<String>,
+    pub embedded_subtitles: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,9 +9,10 @@ async fn fetch_entry_details(
 ) -> Result<ScheduleEntryDetails, sqlx::Error> {
     let row = sqlx::query(
         "SELECT mi.title, mi.media_type, mi.runtime, mi.poster_path, mi.backdrop_path, \
-         (SELECT file_path FROM media_files WHERE media_item_id = mi.id LIMIT 1) as file_path \
+         mf.file_path, mf.audio_tracks, mf.audio_language, mf.embedded_subtitles \
          FROM media_items mi \
-         WHERE mi.id = $1"
+         LEFT JOIN media_files mf ON mf.media_item_id = mi.id \
+         WHERE mi.id = $1 LIMIT 1"
     )
     .bind(&entry.media_item_id)
     .fetch_one(pool)
@@ -23,6 +24,9 @@ async fn fetch_entry_details(
     let poster_path: Option<String> = row.get("poster_path");
     let backdrop_path: Option<String> = row.get("backdrop_path");
     let file_path: Option<String> = row.get("file_path");
+    let audio_tracks: Option<String> = row.get("audio_tracks");
+    let audio_language: Option<String> = row.get("audio_language");
+    let embedded_subtitles: Option<String> = row.get("embedded_subtitles");
 
     Ok(ScheduleEntryDetails {
         entry,
@@ -32,6 +36,9 @@ async fn fetch_entry_details(
         poster_path,
         backdrop_path,
         file_path,
+        audio_tracks,
+        audio_language,
+        embedded_subtitles,
     })
 }
 
@@ -40,11 +47,13 @@ pub async fn get_playout_state(
     channel_id: &str,
     current_time: DateTime<Utc>,
 ) -> Result<PlayoutState, sqlx::Error> {
-    // 1. Find the active entry: start_time <= current_time AND end_time > current_time
+    // 1. Find the active entry: start_time <= current_time AND effective_end_time > current_time
+    // We treat zero-duration entries (start_time == end_time) as having a 66-minute (3960s) effective duration.
     let active_entry: Option<ScheduleEntry> = sqlx::query_as::<_, ScheduleEntry>(
         "SELECT se.* FROM schedule_entries se \
          JOIN schedules s ON se.schedule_id = s.id \
-         WHERE s.channel_id = $1 AND se.start_time <= $2 AND se.end_time > $2 \
+         WHERE s.channel_id = $1 AND datetime(se.start_time) <= datetime($2) \
+         AND (CASE WHEN se.start_time = se.end_time THEN datetime(se.start_time, '+3960 seconds') ELSE datetime(se.end_time) END) > datetime($2) \
          LIMIT 1"
     )
     .bind(channel_id)
@@ -67,17 +76,23 @@ pub async fn get_playout_state(
         None => 0,
     };
 
-    // 2. Find the next entry: starting at or after current_time (or active entry's end_time)
+    // 2. Find the next entry: starting at or after current_time (or active entry's effective end_time)
     let next_search_time = match &active_details {
-        Some(details) => details.entry.end_time,
+        Some(details) => {
+            if details.entry.start_time == details.entry.end_time {
+                details.entry.start_time + chrono::Duration::seconds(3960)
+            } else {
+                details.entry.end_time
+            }
+        }
         None => current_time,
     };
 
     let next_entry: Option<ScheduleEntry> = sqlx::query_as::<_, ScheduleEntry>(
         "SELECT se.* FROM schedule_entries se \
          JOIN schedules s ON se.schedule_id = s.id \
-         WHERE s.channel_id = $1 AND se.start_time >= $2 \
-         ORDER BY se.start_time ASC \
+         WHERE s.channel_id = $1 AND datetime(se.start_time) >= datetime($2) \
+         ORDER BY datetime(se.start_time) ASC \
          LIMIT 1"
     )
     .bind(channel_id)
@@ -99,8 +114,8 @@ pub async fn get_playout_state(
     let previous_entry: Option<ScheduleEntry> = sqlx::query_as::<_, ScheduleEntry>(
         "SELECT se.* FROM schedule_entries se \
          JOIN schedules s ON se.schedule_id = s.id \
-         WHERE s.channel_id = $1 AND se.end_time <= $2 \
-         ORDER BY se.end_time DESC \
+         WHERE s.channel_id = $1 AND (CASE WHEN se.start_time = se.end_time THEN datetime(se.start_time, '+3960 seconds') ELSE datetime(se.end_time) END) <= datetime($2) \
+         ORDER BY (CASE WHEN se.start_time = se.end_time THEN datetime(se.start_time, '+3960 seconds') ELSE datetime(se.end_time) END) DESC \
          LIMIT 1"
     )
     .bind(channel_id)

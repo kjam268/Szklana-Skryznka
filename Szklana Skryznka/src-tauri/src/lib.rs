@@ -98,6 +98,46 @@ pub fn run() {
                 }
             });
 
+            // Listen to av1-progress event to display real-time video encoding progress inside the menu bar icon menu
+            let status_item_av1 = status_item.clone();
+            let progress_item_av1 = progress_item.clone();
+            let handle_av1 = handle.clone();
+            let _ = handle.listen("av1-progress", move |event| {
+                #[derive(serde::Deserialize)]
+                #[allow(dead_code)]
+                struct Av1ProgressPayload {
+                    file_path: String,
+                    status: String,
+                    progress: u32,
+                    eta_str: String,
+                }
+                if let Ok(payload) = serde_json::from_str::<Av1ProgressPayload>(event.payload()) {
+                    let filename = std::path::Path::new(&payload.file_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Media".to_string());
+                    let display_title = if filename.len() > 18 {
+                        format!("{}...", &filename[..16])
+                    } else {
+                        filename.clone()
+                    };
+                    let _ = status_item_av1.set_text(format!("Encoding: {} (ETA: {})", display_title, payload.eta_str));
+                    let filled = payload.progress / 10;
+                    let mut bar = String::new();
+                    for i in 0..10 {
+                        if i < filled as usize {
+                            bar.push('█');
+                        } else {
+                            bar.push('░');
+                        }
+                    }
+                    let _ = progress_item_av1.set_text(format!("[{}] {}% (ETA: {})", bar, payload.progress, payload.eta_str));
+                    if let Some(tray) = handle_av1.tray_by_id("main-tray") {
+                        let _ = tray.set_tooltip(Some(format!("Encoding: {} ({}%) • ETA: {}", display_title, payload.progress, payload.eta_str)));
+                    }
+                }
+            });
+
             tauri::async_runtime::block_on(async move {
                 let pool = db::init_db(&handle).await.expect("Failed to initialize database");
                 
@@ -678,10 +718,19 @@ pub fn run() {
                     }
                 });
 
-                 handle.manage(pool);
-                 handle.manage(RecentHistory {
-                     items: tokio::sync::Mutex::new(Vec::new()),
-                 });
+                  handle.manage(pool);
+                  handle.manage(commands::VlcState {
+                      process: std::sync::Mutex::new(None),
+                      current_file: std::sync::Mutex::new(None),
+                  });
+                  handle.manage(RecentHistory {
+                      items: tokio::sync::Mutex::new(Vec::new()),
+                  });
+
+                  let app_dir = handle.path().app_data_dir().unwrap();
+                  let hls_dir = app_dir.join("hls_out");
+                  let _ = std::fs::create_dir_all(&hls_dir);
+                  commands::start_hls_server(hls_dir);
              });
              Ok(())
          })
@@ -766,7 +815,13 @@ pub fn run() {
             commands::download_opensubtitles,
             commands::select_subtitle_file,
             commands::get_watched_paths,
-            commands::remove_watched_path
+            commands::remove_watched_path,
+            commands::play_in_vlc,
+            commands::kill_vlc,
+            commands::open_tv_window,
+            commands::open_in_vlc_app,
+            commands::evaluate_av1_candidate,
+            commands::transcode_to_av1
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

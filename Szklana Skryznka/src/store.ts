@@ -100,6 +100,9 @@ export interface ScheduleEntryDetails {
   poster_path?: string;
   backdrop_path?: string;
   file_path?: string;
+  audio_tracks?: string;
+  audio_language?: string;
+  embedded_subtitles?: string;
 }
 
 export interface PlayoutState {

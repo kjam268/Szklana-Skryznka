@@ -731,6 +731,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
                               await invoke("purge_database", { target: purgeTarget });
                               setPurgeFeedback("Purge succeeded!");
                               
+                              if (purgeTarget === "all") {
+                                setWatchedPaths([]);
+                              }
                               // Dynamically refresh the relevant stores without reloading the page
                               try {
                                 await useLibraryStore.getState().fetchItems();

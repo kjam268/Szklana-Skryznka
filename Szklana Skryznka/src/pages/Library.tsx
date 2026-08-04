@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLibraryStore, MediaItemDetails, useNotificationStore } from "../store";
-import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown } from "lucide-react";
+import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown, Sparkles } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -20,6 +20,16 @@ export const Library: React.FC = () => {
   const [editTags, setEditTags] = useState("");
   const [editDirectors, setEditDirectors] = useState("");
   const [editActors, setEditActors] = useState("");
+
+  const [av1Eval, setAv1Eval] = useState<{
+    is_candidate: boolean;
+    is_pristine_remux: boolean;
+    reason: string;
+    estimated_savings_pct: number;
+    file_size_gb: number;
+  } | null>(null);
+  const [av1Transcoding, setAv1Transcoding] = useState(false);
+  const [av1ProgressMsg, setAv1ProgressMsg] = useState("");
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -108,6 +118,16 @@ export const Library: React.FC = () => {
       if (unlistenSelect) unlistenSelect();
     };
   }, [fetchItems]);
+
+  useEffect(() => {
+    if (selectedItem?.files?.[0]?.file_path) {
+      invoke("evaluate_av1_candidate", { filePath: selectedItem.files[0].file_path })
+        .then((res: any) => setAv1Eval(res))
+        .catch((err) => console.warn("AV1 eval error:", err));
+    } else {
+      setAv1Eval(null);
+    }
+  }, [selectedItem?.item?.id]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1385,6 +1405,15 @@ export const Library: React.FC = () => {
 
                           {/* Overlaid Tag Badges (Top Left) */}
                           <div className="absolute top-2 left-2 flex flex-col space-y-1 items-start z-20">
+                            {/* File Type & Container Badge */}
+                            {details.files && details.files[0] && (
+                              <div className="text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase bg-black/85 text-cyan-300 border border-cyan-400/30 shadow-lg backdrop-blur-md flex items-center space-x-1 font-mono">
+                                <span>{details.files[0].file_path.split('.').pop()?.toUpperCase() || 'FILE'}</span>
+                                {details.files[0].video_codec && details.files[0].video_codec !== 'Unknown' && (
+                                  <span className="text-gray-400 font-normal">| {details.files[0].video_codec.toUpperCase()}</span>
+                                )}
+                              </div>
+                            )}
                             {isZeroDuration && (
                               <div className="text-[8px] px-1.5 py-0.5 rounded tracking-wider font-extrabold uppercase bg-red-600/90 text-white border border-red-400/20 shadow-md">
                                 0 DURATION
@@ -1798,6 +1827,58 @@ export const Library: React.FC = () => {
                         </span>
                       </div>
                     </div>
+
+                    {/* AV1 OPTIMIZATION CARD & BUTTON */}
+                    {av1Eval && (
+                      <div className="mt-3 p-3 rounded-lg border bg-gray-950/90 border-gray-800 font-mono text-[10px] space-y-2.5 shadow-xl">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-gray-400">AV1 OPTIMIZATION ELIGIBILITY:</span>
+                          {av1Eval.is_pristine_remux ? (
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-extrabold border border-emerald-500/30 tracking-wider">
+                              PRISTINE SOURCE (MASTER QUALITY PROTECTED)
+                            </span>
+                          ) : av1Eval.is_candidate ? (
+                            <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-extrabold border border-cyan-500/30 tracking-wider">
+                              PRIME CANDIDATE (~{av1Eval.estimated_savings_pct}% SAVINGS)
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-400 font-bold">
+                              ALREADY OPTIMIZED
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="text-gray-400 text-[9.5px] leading-relaxed border-t border-gray-900 pt-2">
+                          {av1Eval.reason}
+                        </div>
+
+                        {av1Eval.is_candidate && (
+                          <button
+                            onClick={async () => {
+                              if (!selectedItem.files?.[0]?.file_path) return;
+                              setAv1Transcoding(true);
+                              setAv1ProgressMsg("Launching AV1 Transcode Engine...");
+                              try {
+                                const result = await invoke<string>("transcode_to_av1", {
+                                  filePath: selectedItem.files[0].file_path
+                                });
+                                showToast(`AV1 Optimization Complete! Created: ${result.split("/").pop()}`, "success");
+                                await fetchItems();
+                              } catch (err: any) {
+                                showToast(`AV1 Optimization failed: ${err}`, "error");
+                              } finally {
+                                setAv1Transcoding(false);
+                              }
+                            }}
+                            disabled={av1Transcoding}
+                            className="w-full py-2.5 px-3 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-extrabold shadow-lg transition-all border border-cyan-400/40 flex items-center justify-center space-x-2 cursor-pointer font-sans text-xs tracking-wider"
+                          >
+                            <Sparkles size={14} className="text-yellow-300" />
+                            <span>{av1Transcoding ? (av1ProgressMsg || "OPTIMIZING TO AV1...") : `OPTIMIZE TO AV1 (~${av1Eval.estimated_savings_pct}% SPACE SAVINGS)`}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

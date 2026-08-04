@@ -91,6 +91,36 @@ export const Grid: React.FC = () => {
       });
   }, [fetchItems, startOfWeek, activeChannelId, fetchChannels]);
 
+  // Automatically scroll to the current time slot on mount/load
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (gridCellsRef.current) {
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentMinute = now.getMinutes();
+
+        let hoursElapsed = currentHour - 7;
+        if (hoursElapsed < 0) {
+          hoursElapsed += 24;
+        }
+
+        const elapsedMinutes = hoursElapsed * 60 + currentMinute;
+        const currentSlotIndex = Math.floor(elapsedMinutes / 30);
+        
+        const slotOffsetTop = currentSlotIndex * 64;
+        const viewportHeight = gridCellsRef.current.clientHeight || 500;
+        const targetScrollTop = Math.max(0, slotOffsetTop - viewportHeight / 2 + 32);
+        
+        gridCellsRef.current.scrollTop = targetScrollTop;
+        if (timeColumnRef.current) {
+          timeColumnRef.current.scrollTop = targetScrollTop;
+        }
+      }
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [scheduleEntries.length]);
+
   // Calculate 7 rolling days of the week starting from Monday (startOfWeek)
   const weekDays = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(startOfWeek);

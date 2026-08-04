@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { SplashScreen } from "./pages/SplashScreen";
 import { OnAir } from "./pages/OnAir";
@@ -7,6 +7,7 @@ import { Grid } from "./pages/Grid";
 import { DatabaseViewer } from "./pages/Database";
 import { Health } from "./pages/Health";
 import { Suggestions } from "./pages/Suggestions";
+import { TvClient } from "./pages/TvClient";
 import { useNotificationStore } from "./store";
 
 function App() {
@@ -14,6 +15,25 @@ function App() {
   const [activeTab, setActiveTab] = useState("onair");
   const toasts = useNotificationStore((state) => state.toasts);
   const dismissToast = useNotificationStore((state) => state.dismissToast);
+
+  // 1. Listen for switch-tab events from subcomponents
+  useEffect(() => {
+    const handleSwitchTab = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail) {
+        setActiveTab(customEvent.detail);
+      }
+    };
+    window.addEventListener("switch-tab", handleSwitchTab);
+    return () => window.removeEventListener("switch-tab", handleSwitchTab);
+  }, []);
+
+  // 2. Check if we are running in the bare TV client view
+  const isTvClient = window.location.search.includes("view=tv");
+
+  if (isTvClient) {
+    return <TvClient />;
+  }
 
   // Show splash screen on boot sequence
   if (!isBooted) {
