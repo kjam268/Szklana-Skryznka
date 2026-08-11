@@ -232,3 +232,71 @@ pub struct VideoQualityScore {
     pub deductions: Vec<QualityIssue>,
     pub recommendations: Vec<Recommendation>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerInfo {
+    pub format_name: String,
+    pub format_long_name: String,
+    pub duration_sec: f64,
+    pub size_bytes: i64,
+    pub bitrate: i64,
+    pub start_time: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoStreamInfo {
+    pub index: usize,
+    pub codec_name: String,
+    pub codec_long_name: String,
+    pub profile: String,
+    pub level: i64,
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u32,
+    pub frame_rate: f64,
+    pub color_space: String,
+    pub color_transfer: String,
+    pub color_primaries: String,
+    pub is_hdr: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioStreamInfo {
+    pub index: usize,
+    pub codec_name: String,
+    pub codec_long_name: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub channel_layout: String,
+    pub language: String,
+    pub bitrate: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleStreamInfo {
+    pub index: usize,
+    pub codec_name: String,
+    pub language: String,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaFileMetadata {
+    pub title: Option<String>,
+    pub encoder: Option<String>,
+    pub creation_time: Option<String>,
+    pub writing_library: Option<String>,
+    pub custom_tags: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UniversalMediaInfo {
+    pub file_path: String,
+    pub container: ContainerInfo,
+    pub video_streams: Vec<VideoStreamInfo>,
+    pub audio_streams: Vec<AudioStreamInfo>,
+    pub subtitle_streams: Vec<SubtitleStreamInfo>,
+    pub metadata: MediaFileMetadata,
+    pub is_valid: bool,
+}

@@ -164,6 +164,11 @@ pub async fn compute_video_quality_score(file_path: &str) -> Result<VideoQuality
 
     let streams = metadata.get("streams").and_then(|s| s.as_array());
     let format_obj = metadata.get("format");
+    let _bitrate = format_obj
+        .and_then(|f| f.get("bit_rate"))
+        .and_then(|b| b.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
 
     let video_stream = streams.and_then(|arr| arr.iter().find(|s| s.get("codec_type").and_then(|c| c.as_str()) == Some("video")));
     let audio_stream = streams.and_then(|arr| arr.iter().find(|s| s.get("codec_type").and_then(|c| c.as_str()) == Some("audio")));
@@ -281,5 +286,195 @@ pub async fn compute_video_quality_score(file_path: &str) -> Result<VideoQuality
         qualitative_rating,
         deductions,
         recommendations,
+    })
+}
+
+use crate::models::{
+    AudioStreamInfo, ContainerInfo, MediaFileMetadata, SubtitleStreamInfo, UniversalMediaInfo, VideoStreamInfo
+};
+
+pub struct MediaReader {
+    pub file_path: String,
+    pub info: UniversalMediaInfo,
+}
+
+impl MediaReader {
+    pub async fn open(file_path: &str) -> Result<Self, String> {
+        let info = probe_universal_media(file_path).await?;
+        Ok(Self {
+            file_path: file_path.to_string(),
+            info,
+        })
+    }
+
+    pub fn info(&self) -> &UniversalMediaInfo {
+        &self.info
+    }
+
+    pub fn video_streams(&self) -> &[VideoStreamInfo] {
+        &self.info.video_streams
+    }
+
+    pub fn audio_streams(&self) -> &[AudioStreamInfo] {
+        &self.info.audio_streams
+    }
+
+    pub fn subtitle_streams(&self) -> &[SubtitleStreamInfo] {
+        &self.info.subtitle_streams
+    }
+}
+
+pub async fn extract_thumbnail_frame(file_path: &str, timestamp_sec: f64) -> Result<String, String> {
+    let exe = find_ffmpeg();
+    let out_dir = std::env::temp_dir().join("szklana_thumbnails");
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_file = out_dir.join(format!("thumb_{}.jpg", uuid::Uuid::new_v4()));
+
+    let output = tokio::process::Command::new(exe)
+        .args([
+            "-ss", &format!("{:.2}", timestamp_sec),
+            "-i", file_path,
+            "-vframes", "1",
+            "-q:v", "2",
+            "-y",
+            out_file.to_str().unwrap_or("")
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Thumbnail generation failed: {}", e))?;
+
+    if !output.status.success() || !out_file.exists() {
+        return Err("Failed to extract frame thumbnail via FFmpeg".to_string());
+    }
+
+    Ok(out_file.to_string_lossy().to_string())
+}
+
+pub async fn probe_universal_media(file_path: &str) -> Result<UniversalMediaInfo, String> {
+    let raw_meta = run_ffprobe_json(file_path).await?;
+
+    let format_obj = raw_meta.get("format");
+    let streams_arr = raw_meta.get("streams").and_then(|s| s.as_array());
+
+    let format_name = format_obj
+        .and_then(|f| f.get("format_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let format_long_name = format_obj
+        .and_then(|f| f.get("format_long_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&format_name)
+        .to_string();
+    let duration_sec = format_obj
+        .and_then(|f| f.get("duration"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let size_bytes = format_obj
+        .and_then(|f| f.get("size"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let bitrate = format_obj
+        .and_then(|f| f.get("bit_rate"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let container = ContainerInfo {
+        format_name,
+        format_long_name,
+        duration_sec,
+        size_bytes,
+        bitrate,
+        start_time: 0.0,
+    };
+
+    let mut video_streams = Vec::new();
+    let mut audio_streams = Vec::new();
+    let mut subtitle_streams = Vec::new();
+
+    if let Some(arr) = streams_arr {
+        for (idx, stream) in arr.iter().enumerate() {
+            let codec_type = stream.get("codec_type").and_then(|c| c.as_str()).unwrap_or("");
+            let codec_name = stream.get("codec_name").and_then(|c| c.as_str()).unwrap_or("unknown").to_string();
+            let codec_long_name = stream.get("codec_long_name").and_then(|c| c.as_str()).unwrap_or(&codec_name).to_string();
+
+            match codec_type {
+                "video" => {
+                    let width = stream.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
+                    let height = stream.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32;
+                    let profile = stream.get("profile").and_then(|p| p.as_str()).unwrap_or("Main").to_string();
+                    let level = stream.get("level").and_then(|l| l.as_i64()).unwrap_or(0);
+                    let color_transfer = stream.get("color_transfer").and_then(|c| c.as_str()).unwrap_or("bt709").to_string();
+                    let is_hdr = color_transfer.contains("smpte2084") || color_transfer.contains("arib-std-b67");
+
+                    video_streams.push(VideoStreamInfo {
+                        index: idx,
+                        codec_name,
+                        codec_long_name,
+                        profile,
+                        level,
+                        width,
+                        height,
+                        bit_depth: 8,
+                        frame_rate: 24.0,
+                        color_space: stream.get("color_space").and_then(|c| c.as_str()).unwrap_or("bt709").to_string(),
+                        color_transfer,
+                        color_primaries: stream.get("color_primaries").and_then(|c| c.as_str()).unwrap_or("bt709").to_string(),
+                        is_hdr,
+                    });
+                }
+                "audio" => {
+                    let sample_rate = stream.get("sample_rate").and_then(|s| s.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(44100);
+                    let channels = stream.get("channels").and_then(|c| c.as_u64()).unwrap_or(2) as u32;
+                    let lang = stream.get("tags").and_then(|t| t.get("language")).and_then(|l| l.as_str()).unwrap_or("und").to_string();
+
+                    audio_streams.push(AudioStreamInfo {
+                        index: idx,
+                        codec_name,
+                        codec_long_name,
+                        sample_rate,
+                        channels,
+                        channel_layout: if channels == 6 { "5.1".to_string() } else { "Stereo".to_string() },
+                        language: lang,
+                        bitrate: 192_000,
+                    });
+                }
+                "subtitle" => {
+                    let lang = stream.get("tags").and_then(|t| t.get("language")).and_then(|l| l.as_str()).unwrap_or("und").to_string();
+                    subtitle_streams.push(SubtitleStreamInfo {
+                        index: idx,
+                        codec_name,
+                        language: lang,
+                        is_default: false,
+                        is_forced: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let title = format_obj.and_then(|f| f.get("tags")).and_then(|t| t.get("title")).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let encoder = format_obj.and_then(|f| f.get("tags")).and_then(|t| t.get("encoder")).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let metadata = MediaFileMetadata {
+        title,
+        encoder,
+        creation_time: None,
+        writing_library: None,
+        custom_tags: std::collections::HashMap::new(),
+    };
+
+    Ok(UniversalMediaInfo {
+        file_path: file_path.to_string(),
+        container,
+        video_streams,
+        audio_streams,
+        subtitle_streams,
+        metadata,
+        is_valid: true,
     })
 }

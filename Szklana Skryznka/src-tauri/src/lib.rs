@@ -141,75 +141,75 @@ pub fn run() {
             tauri::async_runtime::block_on(async move {
                 let pool = db::init_db(&handle).await.expect("Failed to initialize database");
                 
-                // Migration cleanup: remove Movie tag from Shorts (duration > 0 and < 1800)
-                let _ = sqlx::query(
-                    "DELETE FROM media_tags WHERE tag_id = (SELECT id FROM tags WHERE name = 'Movie') \
-                     AND media_item_id IN (SELECT media_item_id FROM media_files WHERE duration > 0 AND duration < 1800)"
-                )
-                .execute(&pool)
-                .await;
-                // Database update check: find all existing media files lacking metadata properties
-                // due to the previous codec_type extraction bug, and re-extract their values.
-                if let Ok(pending_rows) = sqlx::query(
-                    "SELECT id, file_path FROM media_files WHERE video_codec IS NULL OR video_codec = ''"
-                )
-                .fetch_all(&pool)
-                .await {
-                    for row in pending_rows {
-                        use sqlx::Row;
-                        let id: String = row.get("id");
-                        let file_path: String = row.get("file_path");
-                        let path = std::path::Path::new(&file_path);
-                        if path.exists() {
-                            let meta = scanner::extract_metadata(path).await;
-                            let _ = sqlx::query(
-                                "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
-                                 video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
-                                 audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
-                                 color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16 WHERE id = $17"
-                            )
-                            .bind(meta.duration)
-                            .bind(&meta.resolution)
-                            .bind(&meta.video_codec)
-                            .bind(&meta.audio_codec)
-                            .bind(meta.video_bitrate)
-                            .bind(meta.frame_rate)
-                            .bind(meta.audio_channels)
-                            .bind(&meta.audio_language)
-                            .bind(&meta.audio_tracks)
-                            .bind(&meta.embedded_subtitles)
-                            .bind(&meta.color_space)
-                            .bind(&meta.color_transfer)
-                            .bind(&meta.color_primaries)
-                            .bind(&meta.video_profile)
-                            .bind(meta.video_level)
-                            .bind(&meta.audio_sample_rate)
-                            .bind(&id)
-                            .execute(&pool)
-                            .await;
-                            
-                            // Get the parent item_id to clean tags
-                            let item_id: Option<String> = sqlx::query_scalar(
-                                "SELECT media_item_id FROM media_files WHERE id = $1"
-                            )
-                            .bind(&id)
-                            .fetch_optional(&pool)
-                            .await
-                            .unwrap_or(None);
+                // Defer heavy database maintenance & metadata repair pass to async background task
+                let maintenance_pool = pool.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = sqlx::query(
+                        "DELETE FROM media_tags WHERE tag_id = (SELECT id FROM tags WHERE name = 'Movie') \
+                         AND media_item_id IN (SELECT media_item_id FROM media_files WHERE duration > 0 AND duration < 1800)"
+                    )
+                    .execute(&maintenance_pool)
+                    .await;
 
-                            if let Some(ref mid) = item_id {
-                                let _ = scanner::check_and_clean_tags(&pool, mid).await;
+                    if let Ok(pending_rows) = sqlx::query(
+                        "SELECT id, file_path FROM media_files WHERE video_codec IS NULL OR video_codec = ''"
+                    )
+                    .fetch_all(&maintenance_pool)
+                    .await {
+                        for row in pending_rows {
+                            use sqlx::Row;
+                            let id: String = row.get("id");
+                            let file_path: String = row.get("file_path");
+                            let path = std::path::Path::new(&file_path);
+                            if path.exists() {
+                                let meta = scanner::extract_metadata(path).await;
+                                let _ = sqlx::query(
+                                    "UPDATE media_files SET duration = $1, resolution = $2, video_codec = $3, audio_codec = $4, \
+                                     video_bitrate = $5, frame_rate = $6, audio_channels = $7, audio_language = $8, \
+                                     audio_tracks = $9, embedded_subtitles = $10, color_space = $11, color_transfer = $12, \
+                                     color_primaries = $13, video_profile = $14, video_level = $15, audio_sample_rate = $16 WHERE id = $17"
+                                )
+                                .bind(meta.duration)
+                                .bind(&meta.resolution)
+                                .bind(&meta.video_codec)
+                                .bind(&meta.audio_codec)
+                                .bind(meta.video_bitrate)
+                                .bind(meta.frame_rate)
+                                .bind(meta.audio_channels)
+                                .bind(&meta.audio_language)
+                                .bind(&meta.audio_tracks)
+                                .bind(&meta.embedded_subtitles)
+                                .bind(&meta.color_space)
+                                .bind(&meta.color_transfer)
+                                .bind(&meta.color_primaries)
+                                .bind(&meta.video_profile)
+                                .bind(meta.video_level)
+                                .bind(&meta.audio_sample_rate)
+                                .bind(&id)
+                                .execute(&maintenance_pool)
+                                .await;
+                                
+                                let item_id: Option<String> = sqlx::query_scalar(
+                                    "SELECT media_item_id FROM media_files WHERE id = $1"
+                                )
+                                .bind(&id)
+                                .fetch_optional(&maintenance_pool)
+                                .await
+                                .unwrap_or(None);
+
+                                if let Some(ref mid) = item_id {
+                                    let _ = scanner::check_and_clean_tags(&maintenance_pool, mid).await;
+                                }
                             }
                         }
                     }
-                }
 
-                // Global tag cleaning pass for all media items in database on startup
-                if let Ok(item_ids) = sqlx::query_scalar::<_, String>("SELECT id FROM media_items").fetch_all(&pool).await {
-                    for mid in item_ids {
-                        let _ = scanner::check_and_clean_tags(&pool, &mid).await;
+                    if let Ok(item_ids) = sqlx::query_scalar::<_, String>("SELECT id FROM media_items").fetch_all(&maintenance_pool).await {
+                        for mid in item_ids {
+                            let _ = scanner::check_and_clean_tags(&maintenance_pool, &mid).await;
+                        }
                     }
-                }
+                });
 
                 // Trigger full sync-and-scan scan of all registered library directories on load/startup
                 let scanned_paths_str: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'scanned_paths'")
@@ -719,9 +719,10 @@ pub fn run() {
                 });
 
                   handle.manage(pool);
-                  handle.manage(commands::VlcState {
-                      process: std::sync::Mutex::new(None),
-                      current_file: std::sync::Mutex::new(None),
+                  handle.manage(commands::TranscoderState {
+                      process: tokio::sync::Mutex::new(None),
+                      current_file: tokio::sync::Mutex::new(None),
+                      is_launching: std::sync::atomic::AtomicBool::new(false),
                   });
                   handle.manage(RecentHistory {
                       items: tokio::sync::Mutex::new(Vec::new()),
@@ -816,13 +817,18 @@ pub fn run() {
             commands::select_subtitle_file,
             commands::get_watched_paths,
             commands::remove_watched_path,
-            commands::play_in_vlc,
-            commands::kill_vlc,
+            commands::start_transcode,
+            commands::stop_transcode,
+            commands::get_hls_status,
             commands::open_tv_window,
             commands::open_in_vlc_app,
             commands::evaluate_av1_candidate,
             commands::transcode_to_av1,
-            commands::get_video_quality_score
+            commands::get_video_quality_score,
+            commands::open_media,
+            commands::read_media_metadata,
+            commands::list_media_streams,
+            commands::extract_media_thumbnail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

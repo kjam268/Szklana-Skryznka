@@ -18,6 +18,12 @@ interface SubtitleRecord {
   is_default: number;
 }
 
+interface HlsStatus {
+  is_streaming: boolean;
+  current_file: string | null;
+  hls_url: string;
+}
+
 function parseSrtToCues(srtText: string): SubtitleCue[] {
   const cues: SubtitleCue[] = [];
   const blocks = srtText.trim().split(/\n\r?\n/);
@@ -89,20 +95,14 @@ export const TvClient: React.FC = () => {
   const [forceVlcMode, setForceVlcMode] = useState(false);
 
   const activeEntry = playoutState?.active_entry;
-  const isWebCompatibleRaw = activeEntry?.file_path
-    ? (activeEntry.file_path.toLowerCase().endsWith(".mp4") ||
-       activeEntry.file_path.toLowerCase().endsWith(".m4v") ||
-       activeEntry.file_path.toLowerCase().endsWith(".mov") ||
-       activeEntry.file_path.toLowerCase().endsWith(".webm") ||
-       activeEntry.file_path.toLowerCase().endsWith(".mp3") ||
+  const isAudioOnly = activeEntry?.file_path
+    ? (activeEntry.file_path.toLowerCase().endsWith(".mp3") ||
        activeEntry.file_path.toLowerCase().endsWith(".aac") ||
        activeEntry.file_path.toLowerCase().endsWith(".wav") ||
-       activeEntry.file_path.toLowerCase().endsWith(".flac")) &&
-      !activeEntry.file_path.toLowerCase().includes("_av1") &&
-      !activeEntry.file_path.toLowerCase().includes("av1")
+       activeEntry.file_path.toLowerCase().endsWith(".flac"))
     : false;
 
-  const isWebCompatible = isWebCompatibleRaw && !forceVlcMode;
+  const isWebCompatible = isAudioOnly && !forceVlcMode;
 
   useEffect(() => {
     setForceVlcMode(false);
@@ -205,45 +205,39 @@ export const TvClient: React.FC = () => {
     return () => clearInterval(interval);
   }, [currentCues, playoutState?.playout_position_ms]);
 
-  const currentPlayingFileRef = useRef<string | null>(null);
-
-  // Sync transcoding playout or direct playout
+  // Poll get_hls_status every 2s — pick up stream started by OnAir Monitor without restarting transcoder
   useEffect(() => {
-    const activeFilePath = activeEntry?.file_path;
-    if (activeFilePath) {
-      if (!isWebCompatible) {
-        if (currentPlayingFileRef.current === activeFilePath && hlsSrc) {
-          return;
-        }
-        currentPlayingFileRef.current = activeFilePath;
-        const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
-        invoke<string>("play_in_vlc", {
-          filePath: activeFilePath,
-          startTimeSec: targetSec
-        })
-        .then(() => {
-          setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}`);
-        })
-        .catch((err) => {
-          console.warn("VLC launch failed inside TV Client, falling back to direct playout:", err);
+    if (!activeEntry?.file_path) {
+      setHlsSrc("");
+      return;
+    }
+    const activeFilePath = activeEntry.file_path;
+
+    const poll = async () => {
+      try {
+        const status = await invoke<HlsStatus>("get_hls_status");
+        if (status.is_streaming && status.current_file === activeFilePath) {
+          setHlsSrc(prev => prev || `${status.hls_url}?t=${Date.now()}`);
+        } else {
           setHlsSrc("");
-        });
-      } else {
-        currentPlayingFileRef.current = null;
+        }
+      } catch {
         setHlsSrc("");
       }
-    } else {
-      currentPlayingFileRef.current = null;
-      setHlsSrc("");
-    }
+    };
+
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => clearInterval(id);
   }, [activeEntry?.file_path, isWebCompatible]);
 
   // Native WebKit HLS Playout Effect for TV Client
   const tvHlsVideoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     if (!hlsSrc || isWebCompatible) return;
-    const targetVideo = tvHlsVideoRef.current || videoRef.current;
-    if (targetVideo) {
+    const targetVideo = tvHlsVideoRef.current;
+    if (!targetVideo) return;
+    if (targetVideo.readyState >= 2) {
       targetVideo.play().catch(err => console.warn("Native HLS play call error:", err));
     }
   }, [hlsSrc, isWebCompatible]);
@@ -308,6 +302,9 @@ export const TvClient: React.FC = () => {
               controls
               playsInline
               crossOrigin="anonymous"
+              onCanPlay={(e) => {
+                (e.target as HTMLVideoElement).play().catch((err) => console.warn("TV Client HLS play onCanPlay error:", err));
+              }}
             />
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center bg-black space-y-4 p-8 text-center">

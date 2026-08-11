@@ -98,20 +98,14 @@ export const OnAir: React.FC = () => {
   const activeEntry = playoutState?.active_entry;
   const nextEntry = playoutState?.next_entry;
 
-  const isWebCompatibleRaw = activeEntry?.file_path
-    ? (activeEntry.file_path.toLowerCase().endsWith(".mp4") ||
-       activeEntry.file_path.toLowerCase().endsWith(".m4v") ||
-       activeEntry.file_path.toLowerCase().endsWith(".mov") ||
-       activeEntry.file_path.toLowerCase().endsWith(".webm") ||
-       activeEntry.file_path.toLowerCase().endsWith(".mp3") ||
+  const isAudioOnly = activeEntry?.file_path
+    ? (activeEntry.file_path.toLowerCase().endsWith(".mp3") ||
        activeEntry.file_path.toLowerCase().endsWith(".aac") ||
        activeEntry.file_path.toLowerCase().endsWith(".wav") ||
-       activeEntry.file_path.toLowerCase().endsWith(".flac")) &&
-      !activeEntry.file_path.toLowerCase().includes("_av1") &&
-      !activeEntry.file_path.toLowerCase().includes("av1")
+       activeEntry.file_path.toLowerCase().endsWith(".flac"))
     : false;
 
-  const isWebCompatible = isWebCompatibleRaw && !forceVlcMode;
+  const isWebCompatible = isAudioOnly && !forceVlcMode;
 
   useEffect(() => {
     setForceVlcMode(false);
@@ -299,10 +293,10 @@ export const OnAir: React.FC = () => {
     };
   }, [channels, playoutState?.active_entry?.id, fetchPlayoutState, isWebCompatible]);
 
-  // Clean up VLC on unmount
+  // Clean up transcoder on unmount
   useEffect(() => {
     return () => {
-      invoke("kill_vlc").catch((err) => console.error("VLC unmount cleanup failed:", err));
+      invoke("stop_transcode").catch((err) => console.error("Transcoder unmount cleanup failed:", err));
     };
   }, []);
 
@@ -318,7 +312,7 @@ export const OnAir: React.FC = () => {
         }
         currentPlayingFileRef.current = activeFilePath;
         const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
-        invoke<string>("play_in_vlc", {
+        invoke<string>("start_transcode", {
           filePath: activeFilePath,
           startTimeSec: targetSec
         })
@@ -326,17 +320,17 @@ export const OnAir: React.FC = () => {
           setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}`);
         })
         .catch((err) => {
-          console.warn("VLC launch failed, using direct playout fallback:", err);
+          console.warn("Transcoder launch failed:", err);
           setHlsSrc("");
         });
       } else {
         currentPlayingFileRef.current = null;
-        invoke("kill_vlc").catch((err) => console.error("VLC kill failed:", err));
+        invoke("stop_transcode").catch((err) => console.error("Transcoder stop failed:", err));
         setHlsSrc("");
       }
     } else if (!vlcActive) {
       currentPlayingFileRef.current = null;
-      invoke("kill_vlc").catch((err) => console.error("VLC kill failed:", err));
+      invoke("stop_transcode").catch((err) => console.error("Transcoder stop failed:", err));
       setHlsSrc("");
     }
   }, [playoutState?.active_entry?.file_path, vlcActive, isWebCompatible]);
@@ -345,8 +339,9 @@ export const OnAir: React.FC = () => {
   const hlsVideoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     if (!hlsSrc || isWebCompatible) return;
-    const targetVideo = hlsVideoRef.current || videoRef.current;
-    if (targetVideo) {
+    const targetVideo = hlsVideoRef.current;
+    if (!targetVideo) return;
+    if (targetVideo.readyState >= 2) {
       targetVideo.play().catch(err => console.warn("Native HLS play call error:", err));
     }
   }, [hlsSrc, isWebCompatible]);
@@ -495,7 +490,7 @@ export const OnAir: React.FC = () => {
           {activeEntry?.file_path ? (
             vlcActive ? (
               isWebCompatible ? (
-                // Direct playout of MP4/M4V/MOV/MKV natively
+                // Direct playout of audio-only files
                 <div className="w-full h-full relative">
                   <video
                     ref={videoRef}
@@ -640,6 +635,9 @@ export const OnAir: React.FC = () => {
                       autoPlay
                       playsInline
                       crossOrigin="anonymous"
+                      onCanPlay={(e) => {
+                        (e.target as HTMLVideoElement).play().catch((err) => console.warn("HLS play onCanPlay error:", err));
+                      }}
                     />
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center bg-black/90 space-y-3 p-6 text-center">
@@ -711,7 +709,7 @@ export const OnAir: React.FC = () => {
                       onClick={() => {
                         const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
                         setHlsSrc(""); // Reset to force reload
-                        invoke<string>("play_in_vlc", {
+                        invoke<string>("start_transcode", {
                           filePath: activeEntry.file_path,
                           startTimeSec: targetSec
                         })
