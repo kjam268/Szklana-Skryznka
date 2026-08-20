@@ -58,6 +58,7 @@ pub async fn init_db(app_handle: &tauri::AppHandle) -> Result<SqlitePool, Box<dy
     add_column_if_missing(&pool, "media_items", "rt_score", "TEXT").await;
     add_column_if_missing(&pool, "media_items", "imdb_score", "TEXT").await;
     add_column_if_missing(&pool, "media_items", "imdb_id", "TEXT").await;
+    add_column_if_missing(&pool, "media_items", "play_count", "INTEGER DEFAULT 0").await;
 
     // Seed 100k movies reference database
     seed_movies_if_empty(&pool).await?;

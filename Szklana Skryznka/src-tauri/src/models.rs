@@ -41,6 +41,19 @@ pub struct MediaItem {
     pub rt_score: Option<String>,
     pub imdb_score: Option<String>,
     pub imdb_id: Option<String>,
+    pub play_count: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleRecordInfo {
+    pub id: String,
+    pub media_item_id: String,
+    pub language: String,
+    pub label: String,
+    pub subtitle_type: String, // "external" or "embedded"
+    pub file_path: Option<String>,
+    pub track_index: Option<usize>,
+    pub is_default: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -270,13 +283,17 @@ pub struct AudioStreamInfo {
     pub channel_layout: String,
     pub language: String,
     pub bitrate: i64,
+    pub title: Option<String>,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleStreamInfo {
     pub index: usize,
+    pub subtitle_stream_index: usize,
     pub codec_name: String,
     pub language: String,
+    pub title: Option<String>,
     pub is_default: bool,
     pub is_forced: bool,
 }
@@ -299,4 +316,18 @@ pub struct UniversalMediaInfo {
     pub subtitle_streams: Vec<SubtitleStreamInfo>,
     pub metadata: MediaFileMetadata,
     pub is_valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AnalysisJob {
+    pub id: String,
+    pub media_file_id: String,
+    pub file_path: String,
+    pub job_type: String,
+    pub status: String,
+    pub progress_percent: i32,
+    pub result_json: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }

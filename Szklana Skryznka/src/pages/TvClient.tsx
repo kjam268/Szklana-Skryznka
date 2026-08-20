@@ -1,21 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useChannelStore } from "../store";
-import { Globe, Subtitles, ChevronDown, Check, PlayCircle, RefreshCw } from "lucide-react";
+import { useChannelStore, SubtitleRecordInfo, AudioStreamInfo } from "../store";
+import { Globe, Subtitles, ChevronDown, Check, RefreshCw } from "lucide-react";
 
 interface SubtitleCue {
   start: number;
   end: number;
   text: string;
-}
-
-interface SubtitleRecord {
-  id: string;
-  media_item_id: string;
-  language: string;
-  subtitle_type: string;
-  file_path: string;
-  is_default: number;
 }
 
 interface HlsStatus {
@@ -52,19 +43,16 @@ function parseSrtToCues(srtText: string): SubtitleCue[] {
   return cues;
 }
 
-function srtToVttBlobUrl(srtText: string): string {
-  const vttText = "WEBVTT\n\n" + srtText.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
-  const blob = new Blob([vttText], { type: "text/vtt" });
-  return URL.createObjectURL(blob);
-}
 
 export const TvClient: React.FC = () => {
   const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hlsSrc, setHlsSrc] = useState<string>("");
+  const hlsSrcRef = useRef<string>("");
+  useEffect(() => { hlsSrcRef.current = hlsSrc; }, [hlsSrc]);
 
   // Subtitles & Audio Track state
-  const [subtitles, setSubtitles] = useState<SubtitleRecord[]>([]);
+  const [subtitles, setSubtitles] = useState<SubtitleRecordInfo[]>([]);
   const [selectedSubtitleId, setSelectedSubtitleId] = useState<string>("off");
   const [currentCues, setCurrentCues] = useState<SubtitleCue[]>([]);
   const [activeCueText, setActiveCueText] = useState<string>("");
@@ -72,8 +60,8 @@ export const TvClient: React.FC = () => {
   const [showControls, setShowControls] = useState(false);
   const [showSubMenu, setShowSubMenu] = useState(false);
 
-  const [availableAudioTracks, setAvailableAudioTracks] = useState<string[]>([]);
-  const [selectedAudioTrack, setSelectedAudioTrack] = useState<string>("default");
+  const [availableAudioTracks, setAvailableAudioTracks] = useState<AudioStreamInfo[]>([]);
+  const [selectedAudioTrackIdx, setSelectedAudioTrackIdx] = useState<number>(0);
   const [showAudioMenu, setShowAudioMenu] = useState(false);
 
   // Sync EPG State periodically
@@ -92,8 +80,6 @@ export const TvClient: React.FC = () => {
     return () => clearInterval(slowInterval);
   }, [channels, fetchPlayoutState]);
 
-  const [forceVlcMode, setForceVlcMode] = useState(false);
-
   const activeEntry = playoutState?.active_entry;
   const isAudioOnly = activeEntry?.file_path
     ? (activeEntry.file_path.toLowerCase().endsWith(".mp3") ||
@@ -102,13 +88,19 @@ export const TvClient: React.FC = () => {
        activeEntry.file_path.toLowerCase().endsWith(".flac"))
     : false;
 
-  const isWebCompatible = isAudioOnly && !forceVlcMode;
+  const isWebCompatible = isAudioOnly;
 
-  useEffect(() => {
-    setForceVlcMode(false);
-  }, [activeEntry?.id]);
+  // Helper: build human-readable label for an audio stream
+  const buildAudioLabel = (track: AudioStreamInfo): string => {
+    const lang = track.language && track.language !== "und" ? track.language.toUpperCase() : "UND";
+    const layout = track.channel_layout || (track.channels >= 6 ? "5.1" : "Stereo");
+    const codec = track.codec_name.toUpperCase();
+    const title = track.title ? ` — ${track.title}` : "";
+    const defTag = track.is_default ? " ✓" : "";
+    return `${lang} — ${layout} (${codec}${title})${defTag}`;
+  };
 
-  // Fetch subtitles and audio tracks for active item
+  // Fetch subtitles (universal: external + embedded) and audio tracks
   useEffect(() => {
     if (!activeEntry?.media_item_id) {
       setSubtitles([]);
@@ -120,7 +112,10 @@ export const TvClient: React.FC = () => {
       return;
     }
 
-    invoke<SubtitleRecord[]>("get_subtitles", { mediaItemId: activeEntry.media_item_id })
+    invoke<SubtitleRecordInfo[]>("get_media_subtitles", {
+      mediaItemId: activeEntry.media_item_id,
+      filePath: activeEntry.file_path || null,
+    })
       .then((res) => {
         setSubtitles(res || []);
         const defaultSub = res?.find(s => s.is_default === 1) || res?.[0];
@@ -135,25 +130,32 @@ export const TvClient: React.FC = () => {
         setSubtitles([]);
       });
 
-    // Parse audio tracks
-    const tracks: string[] = [];
-    if (activeEntry.audio_language) {
-      tracks.push(activeEntry.audio_language.toUpperCase());
+    // Probe real audio streams
+    if (activeEntry.file_path) {
+      invoke<{ audio: AudioStreamInfo[] }>("list_media_streams", { path: activeEntry.file_path })
+        .then((streams) => {
+          const audioTracks = streams.audio || [];
+          setAvailableAudioTracks(audioTracks);
+          const defaultIdx = audioTracks.findIndex(t => t.is_default);
+          setSelectedAudioTrackIdx(defaultIdx >= 0 ? defaultIdx : 0);
+        })
+        .catch(() => {
+          const fallback: AudioStreamInfo[] = [{
+            index: 0, codec_name: "aac", codec_long_name: "AAC",
+            sample_rate: 48000, channels: 2, channel_layout: "Stereo",
+            language: activeEntry.audio_language || "und", bitrate: 0,
+            title: undefined, is_default: true
+          }];
+          setAvailableAudioTracks(fallback);
+          setSelectedAudioTrackIdx(0);
+        });
+    } else {
+      setAvailableAudioTracks([]);
+      setSelectedAudioTrackIdx(0);
     }
-    if (activeEntry.audio_tracks) {
-      const splitTracks = activeEntry.audio_tracks.split(",").map(t => t.trim());
-      splitTracks.forEach(t => {
-        if (t && !tracks.includes(t)) tracks.push(t);
-      });
-    }
-    if (tracks.length === 0) {
-      tracks.push("Stereo (Default)");
-    }
-    setAvailableAudioTracks(tracks);
-    setSelectedAudioTrack(tracks[0]);
   }, [activeEntry?.media_item_id]);
 
-  // Load and parse selected subtitle track
+  // Load and parse selected subtitle track via Tauri IPC
   useEffect(() => {
     if (selectedSubtitleId === "off" || !selectedSubtitleId) {
       setCurrentCues([]);
@@ -163,24 +165,27 @@ export const TvClient: React.FC = () => {
     }
 
     const sub = subtitles.find(s => s.id === selectedSubtitleId);
-    if (!sub || !sub.file_path) {
+    if (!sub) {
       setCurrentCues([]);
       setActiveCueText("");
       setVttTrackUrl("");
       return;
     }
 
-    const fileUrl = convertFileSrc(sub.file_path);
-    fetch(fileUrl)
-      .then(res => res.text())
+    const trackIndex = (sub as SubtitleRecordInfo).track_index;
+    invoke<string>("read_subtitle_content", {
+      filePath: sub.file_path || "",
+      trackIndex: trackIndex ?? null,
+    })
       .then(text => {
         const cues = parseSrtToCues(text);
         setCurrentCues(cues);
-        const vttUrl = srtToVttBlobUrl(text);
-        setVttTrackUrl(vttUrl);
+        const vttText = "WEBVTT\n\n" + text.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+        const blob = new Blob([vttText], { type: "text/vtt" });
+        setVttTrackUrl(URL.createObjectURL(blob));
       })
       .catch(err => {
-        console.error("Failed to load subtitle file in TV Client:", err);
+        console.error("Failed to load subtitle content in TV Client:", err);
         setCurrentCues([]);
         setVttTrackUrl("");
       });
@@ -205,20 +210,21 @@ export const TvClient: React.FC = () => {
     return () => clearInterval(interval);
   }, [currentCues, playoutState?.playout_position_ms]);
 
-  // Poll get_hls_status every 2s — pick up stream started by OnAir Monitor without restarting transcoder
+  // Poll get_hls_status — pick up stream started by OnAir Monitor without restarting transcoder
   useEffect(() => {
-    if (!activeEntry?.file_path) {
-      setHlsSrc("");
-      return;
-    }
-    const activeFilePath = activeEntry.file_path;
+    let lastStreamFile: string | null = null;
 
     const poll = async () => {
       try {
         const status = await invoke<HlsStatus>("get_hls_status");
-        if (status.is_streaming && status.current_file === activeFilePath) {
-          setHlsSrc(prev => prev || `${status.hls_url}?t=${Date.now()}`);
+        if (status.is_streaming) {
+          // Only update hlsSrc when the file changes or src is empty (avoid constant reloads)
+          if (status.current_file !== lastStreamFile || !hlsSrcRef.current) {
+            lastStreamFile = status.current_file;
+            setHlsSrc(`${status.hls_url}?t=${Date.now()}`);
+          }
         } else {
+          lastStreamFile = null;
           setHlsSrc("");
         }
       } catch {
@@ -227,9 +233,9 @@ export const TvClient: React.FC = () => {
     };
 
     poll();
-    const id = setInterval(poll, 2000);
+    const id = setInterval(poll, 3000);
     return () => clearInterval(id);
-  }, [activeEntry?.file_path, isWebCompatible]);
+  }, []);
 
   // Native WebKit HLS Playout Effect for TV Client
   const tvHlsVideoRef = useRef<HTMLVideoElement>(null);
@@ -254,14 +260,28 @@ export const TvClient: React.FC = () => {
     }
   }, [activeEntry?.id, isWebCompatible, playoutState?.playout_position_ms]);
 
-  const handleAudioTrackSelect = (trackName: string) => {
-    setSelectedAudioTrack(trackName);
+  const handleAudioTrackSelect = (track: AudioStreamInfo, newIdx: number) => {
+    const prevIdx = selectedAudioTrackIdx;
+    setSelectedAudioTrackIdx(newIdx);
     setShowAudioMenu(false);
+    // For direct playout (audio-only), try HTMLMediaElement.audioTracks
     if (videoRef.current && (videoRef.current as any).audioTracks) {
-      const audioTracks = (videoRef.current as any).audioTracks;
-      for (let i = 0; i < audioTracks.length; i++) {
-        audioTracks[i].enabled = (i === availableAudioTracks.indexOf(trackName));
+      const at = (videoRef.current as any).audioTracks;
+      for (let i = 0; i < at.length; i++) {
+        at[i].enabled = (i === newIdx);
       }
+    }
+    // For HLS: restart transcoder with the new audio track index
+    if (hlsSrc && activeEntry?.file_path && newIdx !== prevIdx) {
+      const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
+      setHlsSrc("");
+      invoke<string>("start_transcode", {
+        filePath: activeEntry.file_path,
+        startTimeSec: targetSec,
+        audioTrackIndex: track.index,
+      })
+        .then(() => setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}&a=${newIdx}`))
+        .catch((err) => console.error("TV audio track switch failed:", err));
     }
   };
 
@@ -283,8 +303,7 @@ export const TvClient: React.FC = () => {
               muted={false}
               loop={false}
               onError={() => {
-                console.warn("Native WebKit video playout failed for file. Automatic failover to VLC HLS proxy stream...");
-                setForceVlcMode(true);
+                console.warn("Direct video playout failed for file.");
               }}
             >
               {vttTrackUrl && (
@@ -327,18 +346,6 @@ export const TvClient: React.FC = () => {
 
           {/* TV CLIENT CONTROLS OVERLAY (Shown on mouse hover) */}
           <div className={`absolute top-4 right-4 flex items-center space-x-3 transition-opacity duration-300 z-30 font-mono ${showControls || showAudioMenu || showSubMenu ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
-            <button
-              onClick={() => {
-                if (activeEntry?.file_path) {
-                  invoke("open_in_vlc_app", { filePath: activeEntry.file_path }).catch(err => console.error(err));
-                }
-              }}
-              className="flex items-center space-x-1.5 px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500 text-xs text-cyan-300 hover:text-black border border-cyan-500/40 rounded-lg shadow-xl backdrop-blur-md transition-all font-mono font-bold cursor-pointer"
-              title="Open stream natively in VLC Player app"
-            >
-              <PlayCircle size={14} />
-              <span>OPEN IN NATIVE VLC APP</span>
-            </button>
             {/* Audio Track Selector */}
             <div className="relative">
               <button
@@ -347,23 +354,27 @@ export const TvClient: React.FC = () => {
                 title="Audio Language Selection"
               >
                 <Globe size={14} className="text-cyan-400" />
-                <span className="text-xs font-bold">{selectedAudioTrack}</span>
+                <span className="text-xs font-bold max-w-[120px] truncate">
+                  {availableAudioTracks[selectedAudioTrackIdx]
+                    ? buildAudioLabel(availableAudioTracks[selectedAudioTrackIdx])
+                    : "Audio"}
+                </span>
                 <ChevronDown size={12} />
               </button>
 
               {showAudioMenu && (
-                <div className="absolute top-full right-0 mt-1 w-48 bg-gray-950 border border-gray-700 rounded-lg shadow-2xl z-40 py-1 font-sans text-xs">
+                <div className="absolute top-full right-0 mt-1 w-60 bg-gray-950 border border-gray-700 rounded-lg shadow-2xl z-40 py-1 font-sans text-xs">
                   <div className="px-3 py-1 text-[10px] font-bold text-gray-400 border-b border-gray-800 uppercase">Audio Track</div>
-                  {availableAudioTracks.map((trk) => (
+                  {availableAudioTracks.map((trk, i) => (
                     <button
-                      key={trk}
-                      onClick={() => handleAudioTrackSelect(trk)}
+                      key={trk.index}
+                      onClick={() => handleAudioTrackSelect(trk, i)}
                       className={`w-full text-left px-3 py-2 flex items-center justify-between hover:bg-gray-800 transition-colors ${
-                        selectedAudioTrack === trk ? "text-cyan-400 font-bold" : "text-gray-200"
+                        selectedAudioTrackIdx === i ? "text-cyan-400 font-bold" : "text-gray-200"
                       }`}
                     >
-                      <span>{trk}</span>
-                      {selectedAudioTrack === trk && <Check size={14} className="text-cyan-400" />}
+                      <span className="truncate">{buildAudioLabel(trk)}</span>
+                      {selectedAudioTrackIdx === i && <Check size={14} className="text-cyan-400 shrink-0 ml-1" />}
                     </button>
                   ))}
                 </div>
@@ -378,10 +389,10 @@ export const TvClient: React.FC = () => {
                 title="Subtitle Track Selection"
               >
                 <Subtitles size={14} className="text-cyan-400" />
-                <span className="text-xs font-bold">
+                <span className="text-xs font-bold max-w-[120px] truncate">
                   {selectedSubtitleId === "off"
                     ? "Subtitles: Off"
-                    : subtitles.find(s => s.id === selectedSubtitleId)?.language.toUpperCase() || "Subtitles"}
+                    : subtitles.find(s => s.id === selectedSubtitleId)?.label || "Subtitles"}
                 </span>
                 <ChevronDown size={12} />
               </button>
@@ -407,8 +418,8 @@ export const TvClient: React.FC = () => {
                         selectedSubtitleId === sub.id ? "text-cyan-400 font-bold" : "text-gray-200"
                       }`}
                     >
-                      <span>{sub.language.toUpperCase()} ({sub.subtitle_type.toUpperCase()})</span>
-                      {selectedSubtitleId === sub.id && <Check size={14} className="text-cyan-400" />}
+                      <span className="truncate">{sub.label}</span>
+                      {selectedSubtitleId === sub.id && <Check size={14} className="text-cyan-400 shrink-0 ml-1" />}
                     </button>
                   ))}
                 </div>

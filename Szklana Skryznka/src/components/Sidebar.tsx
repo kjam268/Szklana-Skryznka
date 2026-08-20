@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { 
-  Tv, Film, CalendarDays, Database, Activity, Lightbulb, 
+  Tv, Film, CalendarDays, Database, BarChart3, Lightbulb, 
   ChevronLeft, Settings
 } from "lucide-react";
 import { useLibraryStore, useScheduleStore, useChannelStore } from "../store";
@@ -119,7 +119,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: "library", label: "The Library", icon: Film },
     { id: "grid", label: "The Grid", icon: CalendarDays },
     { id: "database", label: "Database Viewer", icon: Database },
-    { id: "health", label: "Health & Integrity", icon: Activity },
+    { id: "health", label: "Statistics", icon: BarChart3 },
     { id: "suggestions", label: "Smart Suggestions", icon: Lightbulb },
   ];
 

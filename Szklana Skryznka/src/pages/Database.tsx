@@ -63,6 +63,7 @@ export const DatabaseViewer: React.FC = () => {
         quality_score: firstFile.quality_score !== undefined && firstFile.quality_score !== null
           ? `${firstFile.quality_score.toFixed(1)} / 100`
           : "N/A",
+        play_count: details.item.play_count || 0,
       };
     });
     setRowData(mapped);
@@ -72,6 +73,7 @@ export const DatabaseViewer: React.FC = () => {
     { field: "id", headerName: "ID", width: 100, editable: false },
     { field: "title", headerName: "FILENAME", width: 180, editable: false }, // Filename represents title, read-only
     { field: "original_title", headerName: "LIBRARY TITLE", width: 160, editable: true }, // Library title, editable
+    { field: "play_count", headerName: "TIMES PLAYED", width: 125, editable: false },
     { field: "media_type", headerName: "TYPE", width: 90, editable: true, cellEditor: 'agSelectCellEditor', cellEditorParams: {
         values: ["Movie", "TVShow", "Episode", "Anime", "Documentary", "Educational", "Bumper", "StationID", "Trailer", "Commercial"]
       } 

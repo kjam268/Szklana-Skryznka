@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useLibraryStore, MediaItemDetails, useNotificationStore } from "../store";
-import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown, Sparkles } from "lucide-react";
+import { useLibraryStore, MediaItemDetails, useNotificationStore, useAnalysisStore } from "../store";
+import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown } from "lucide-react";
 
 export const Library: React.FC = () => {
   const { 
@@ -10,6 +10,7 @@ export const Library: React.FC = () => {
     fetchItems, scanLibrary, saveMetadata, deleteItem, setSearchQuery 
   } = useLibraryStore();
   const showToast = useNotificationStore((state) => state.showToast);
+  const activeProgress = useAnalysisStore((state) => state.activeProgress);
 
   const [selectedItem, setSelectedItem] = useState<MediaItemDetails | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -20,17 +21,7 @@ export const Library: React.FC = () => {
   const [editTags, setEditTags] = useState("");
   const [editDirectors, setEditDirectors] = useState("");
   const [editActors, setEditActors] = useState("");
-
-  const [av1Eval, setAv1Eval] = useState<{
-    is_candidate: boolean;
-    is_pristine_remux: boolean;
-    reason: string;
-    estimated_savings_pct: number;
-    file_size_gb: number;
-  } | null>(null);
   const [vqsDetails, setVqsDetails] = useState<any | null>(null);
-  const [av1Transcoding, setAv1Transcoding] = useState(false);
-  const [av1ProgressMsg, setAv1ProgressMsg] = useState("");
 
   const formatRuntime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -88,6 +79,7 @@ export const Library: React.FC = () => {
     let active = true;
     let unlistenLib: (() => void) | null = null;
     let unlistenSelect: (() => void) | null = null;
+    let unlistenProgress: (() => void) | null = null;
 
     const setupListeners = async () => {
       const unsubLib = await listen("library-updated", () => {
@@ -101,13 +93,19 @@ export const Library: React.FC = () => {
           handleSelectCard(targetItem);
         }
       });
+      const unsubProgress = await listen<{ job_id: string; media_file_id: string; filename: string; progress: number; stage: string }>("analysis-job-progress", (event) => {
+        const { media_file_id, progress, stage, filename } = event.payload;
+        useAnalysisStore.getState().updateJobProgress(media_file_id, progress, stage, filename);
+      });
 
       if (!active) {
         unsubLib();
         unsubSelect();
+        unsubProgress();
       } else {
         unlistenLib = unsubLib;
         unlistenSelect = unsubSelect;
+        unlistenProgress = unsubProgress;
       }
     };
 
@@ -117,20 +115,16 @@ export const Library: React.FC = () => {
       active = false;
       if (unlistenLib) unlistenLib();
       if (unlistenSelect) unlistenSelect();
+      if (unlistenProgress) unlistenProgress();
     };
   }, [fetchItems]);
 
   useEffect(() => {
     if (selectedItem?.files?.[0]?.file_path) {
-      invoke("evaluate_av1_candidate", { filePath: selectedItem.files[0].file_path })
-        .then((res: any) => setAv1Eval(res))
-        .catch((err) => console.warn("AV1 eval error:", err));
-
       invoke("get_video_quality_score", { filePath: selectedItem.files[0].file_path })
         .then((res: any) => setVqsDetails(res))
         .catch((err) => console.warn("VQS eval error:", err));
     } else {
-      setAv1Eval(null);
       setVqsDetails(null);
     }
   }, [selectedItem?.item?.id]);
@@ -774,6 +768,22 @@ export const Library: React.FC = () => {
                                   </div>
                                 )}
                               </div>
+
+                              {/* Live Background Analysis Progress Bar Overlay */}
+                              {details.files && details.files[0] && activeProgress[details.files[0].id] && activeProgress[details.files[0].id].progress < 100 && (
+                                <div className="absolute bottom-0 inset-x-0 bg-black/85 backdrop-blur-sm p-1.5 z-20 border-t border-amber-500/40 font-mono text-[8px] flex flex-col space-y-1">
+                                  <div className="flex justify-between items-center text-amber-300 font-extrabold">
+                                    <span className="truncate max-w-[120px]">{activeProgress[details.files[0].id].stage}</span>
+                                    <span>{activeProgress[details.files[0].id].progress}%</span>
+                                  </div>
+                                  <div className="w-full bg-gray-800 rounded-full h-1 overflow-hidden">
+                                    <div 
+                                      className="bg-gradient-to-r from-amber-500 to-yellow-300 h-full rounded-full transition-all duration-300"
+                                      style={{ width: `${activeProgress[details.files[0].id].progress}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
                             </div>
                             <div className="p-3 space-y-1">
                               <div className="text-xs font-bold text-gray-200 truncate">{capitalizeTitle(details.item.title)}</div>
@@ -1454,6 +1464,22 @@ export const Library: React.FC = () => {
                               </div>
                             )}
                           </div>
+
+                          {/* Live Background Analysis Progress Bar Overlay */}
+                          {details.files && details.files[0] && activeProgress[details.files[0].id] && activeProgress[details.files[0].id].progress < 100 && (
+                            <div className="absolute bottom-0 inset-x-0 bg-black/85 backdrop-blur-sm p-1.5 z-20 border-t border-amber-500/40 font-mono text-[8px] flex flex-col space-y-1">
+                              <div className="flex justify-between items-center text-amber-300 font-extrabold">
+                                <span className="truncate max-w-[120px]">{activeProgress[details.files[0].id].stage}</span>
+                                <span>{activeProgress[details.files[0].id].progress}%</span>
+                              </div>
+                              <div className="w-full bg-gray-800 rounded-full h-1 overflow-hidden">
+                                <div 
+                                  className="bg-gradient-to-r from-amber-500 to-yellow-300 h-full rounded-full transition-all duration-300"
+                                  style={{ width: `${activeProgress[details.files[0].id].progress}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
                         <div className="p-3 space-y-1">
                           <div className="text-xs font-bold text-gray-200 truncate">{capitalizeTitle(details.item.title)}</div>
@@ -1833,6 +1859,20 @@ export const Library: React.FC = () => {
                         </span>
                       </div>
 
+                      <button
+                        onClick={async () => {
+                          if (selectedItem.files?.[0]?.id) {
+                            await useAnalysisStore.getState().enqueueMedia(selectedItem.files[0].id);
+                            showToast("Enqueued file for deep frame quality scan", "success");
+                            await fetchItems(true);
+                          }
+                        }}
+                        className="w-full mt-2 py-1.5 px-3 bg-amber-500/15 border border-amber-500/30 hover:bg-amber-500 hover:text-black text-amber-300 text-xs font-bold rounded flex items-center justify-center space-x-1.5 transition-all cursor-pointer font-mono"
+                      >
+                        <RefreshCw size={12} />
+                        <span>RE-ANALYZE QUALITY (DEEP SCAN)</span>
+                      </button>
+
                       {/* DETAILED VQS ANALYSIS BREAKDOWN */}
                       {vqsDetails && (
                         <div className="mt-3 p-3 rounded-lg border bg-gray-950/90 border-amber-500/20 font-mono text-[10px] space-y-2.5 shadow-xl">
@@ -1888,57 +1928,6 @@ export const Library: React.FC = () => {
                       )}
                     </div>
 
-                    {/* AV1 OPTIMIZATION CARD & BUTTON */}
-                    {av1Eval && (
-                      <div className="mt-3 p-3 rounded-lg border bg-gray-950/90 border-gray-800 font-mono text-[10px] space-y-2.5 shadow-xl">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-gray-400">AV1 OPTIMIZATION ELIGIBILITY:</span>
-                          {av1Eval.is_pristine_remux ? (
-                            <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-extrabold border border-emerald-500/30 tracking-wider">
-                              PRISTINE SOURCE (MASTER QUALITY PROTECTED)
-                            </span>
-                          ) : av1Eval.is_candidate ? (
-                            <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-extrabold border border-cyan-500/30 tracking-wider">
-                              PRIME CANDIDATE (~{av1Eval.estimated_savings_pct}% SAVINGS)
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-400 font-bold">
-                              ALREADY OPTIMIZED
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="text-gray-400 text-[9.5px] leading-relaxed border-t border-gray-900 pt-2">
-                          {av1Eval.reason}
-                        </div>
-
-                        {av1Eval.is_candidate && (
-                          <button
-                            onClick={async () => {
-                              if (!selectedItem.files?.[0]?.file_path) return;
-                              setAv1Transcoding(true);
-                              setAv1ProgressMsg("Launching AV1 Transcode Engine...");
-                              try {
-                                const result = await invoke<string>("transcode_to_av1", {
-                                  filePath: selectedItem.files[0].file_path
-                                });
-                                showToast(`AV1 Optimization Complete! Created: ${result.split("/").pop()}`, "success");
-                                await fetchItems();
-                              } catch (err: any) {
-                                showToast(`AV1 Optimization failed: ${err}`, "error");
-                              } finally {
-                                setAv1Transcoding(false);
-                              }
-                            }}
-                            disabled={av1Transcoding}
-                            className="w-full py-2.5 px-3 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-extrabold shadow-lg transition-all border border-cyan-400/40 flex items-center justify-center space-x-2 cursor-pointer font-sans text-xs tracking-wider"
-                          >
-                            <Sparkles size={14} className="text-yellow-300" />
-                            <span>{av1Transcoding ? (av1ProgressMsg || "OPTIMIZING TO AV1...") : `OPTIMIZE TO AV1 (~${av1Eval.estimated_savings_pct}% SPACE SAVINGS)`}</span>
-                          </button>
-                        )}
-                      </div>
-                    )}
                   </div>
                 )}
               </div>

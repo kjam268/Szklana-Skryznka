@@ -6,7 +6,7 @@ use sqlx::{SqlitePool, Row};
 use chrono::{DateTime, Utc, Duration};
 use crate::models::{
     MediaItem, MediaItemDetails, MediaFile, Subtitle,
-    ScheduleEntryDetails, PlayoutState, DiagnosticsReport, Channel
+    ScheduleEntryDetails, PlayoutState, DiagnosticsReport, Channel, AnalysisJob
 };
 use crate::playout::get_playout_state;
 use crate::scanner::scan_directory;
@@ -70,6 +70,77 @@ pub async fn stop_scan(pool: DbState<'_>) -> Result<(), String> {
         .execute(&*pool)
         .await
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_analysis_queue(pool: DbState<'_>) -> Result<Vec<AnalysisJob>, String> {
+    let jobs: Vec<AnalysisJob> = sqlx::query_as::<_, AnalysisJob>(
+        "SELECT * FROM analysis_jobs ORDER BY CASE status WHEN 'running' THEN 1 WHEN 'pending' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END, created_at DESC LIMIT 100"
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(jobs)
+}
+
+#[tauri::command]
+pub async fn enqueue_media_analysis(pool: DbState<'_>, media_file_id: String) -> Result<(), String> {
+    info!("Enqueuing media analysis for file: {}", media_file_id);
+    let file: Option<(String,)> = sqlx::query_as(
+        "SELECT file_path FROM media_files WHERE id = $1"
+    )
+    .bind(&media_file_id)
+    .fetch_optional(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some((path,)) = file {
+        let job_id = format!("job_{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO analysis_jobs (id, media_file_id, file_path, job_type, status, progress_percent) \
+             VALUES ($1, $2, $3, 'full_quality_scan', 'pending', 0)"
+        )
+        .bind(&job_id)
+        .bind(&media_file_id)
+        .bind(&path)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Reset quality_score_done to trigger re-scan in UI
+        let _ = sqlx::query("UPDATE media_files SET quality_score_done = 0 WHERE id = $1")
+            .bind(&media_file_id)
+            .execute(&*pool)
+            .await;
+    } else {
+        return Err("Media file not found".to_string());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn retry_failed_jobs(pool: DbState<'_>) -> Result<(), String> {
+    info!("Retrying failed analysis jobs");
+    sqlx::query(
+        "UPDATE analysis_jobs SET status = 'pending', progress_percent = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE status = 'failed'"
+    )
+    .execute(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_completed_jobs(pool: DbState<'_>) -> Result<(), String> {
+    sqlx::query("DELETE FROM analysis_jobs WHERE status = 'completed'")
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -359,6 +430,144 @@ pub async fn get_subtitles(pool: DbState<'_>, media_item_id: String) -> Result<V
         .fetch_all(&*pool)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_media_subtitles(
+    pool: DbState<'_>,
+    media_item_id: String,
+    file_path: Option<String>,
+) -> Result<Vec<crate::models::SubtitleRecordInfo>, String> {
+    let mut results = Vec::new();
+
+    // 1. Query external subtitles from the database
+    let external_subs: Vec<Subtitle> = sqlx::query_as::<_, Subtitle>("SELECT * FROM subtitles WHERE media_item_id = $1")
+        .bind(&media_item_id)
+        .fetch_all(&*pool)
+        .await
+        .unwrap_or_default();
+
+    for sub in external_subs {
+        results.push(crate::models::SubtitleRecordInfo {
+            id: sub.id.clone(),
+            media_item_id: media_item_id.clone(),
+            language: sub.language.clone(),
+            label: format!("{} (External SRT)", sub.language.to_uppercase()),
+            subtitle_type: "external".to_string(),
+            file_path: Some(sub.file_path),
+            track_index: None,
+            is_default: sub.is_default,
+        });
+    }
+
+    // 2. Discover embedded subtitle tracks in media file if provided
+    if let Some(ref path) = file_path {
+        if let Ok(info) = crate::media_engine::probe_universal_media(path).await {
+            for sub_stream in info.subtitle_streams.iter() {
+                let lang = if sub_stream.language.is_empty() || sub_stream.language == "und" {
+                    format!("Track {}", sub_stream.subtitle_stream_index + 1)
+                } else {
+                    sub_stream.language.clone()
+                };
+                let codec = &sub_stream.codec_name;
+                let title_suffix = sub_stream.title.as_ref().map(|t| format!(" — {}", t)).unwrap_or_default();
+                let forced_tag = if sub_stream.is_forced { " [Forced]" } else { "" };
+                results.push(crate::models::SubtitleRecordInfo {
+                    id: format!("embedded_{}", sub_stream.subtitle_stream_index),
+                    media_item_id: media_item_id.clone(),
+                    language: lang.clone(),
+                    label: format!("{} — {} (Embedded{}{})", lang.to_uppercase(), codec.to_uppercase(), title_suffix, forced_tag),
+                    subtitle_type: "embedded".to_string(),
+                    file_path: Some(path.clone()),
+                    track_index: Some(sub_stream.subtitle_stream_index),
+                    is_default: if sub_stream.is_default || results.is_empty() { 1 } else { 0 },
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn read_subtitle_content(
+    pool: DbState<'_>,
+    file_path: Option<String>,
+    subtitle_id: Option<String>,
+    track_index: Option<usize>,
+) -> Result<String, String> {
+    // 1. If subtitle_id is provided and refers to a DB entry
+    if let Some(ref sub_id) = subtitle_id {
+        if !sub_id.starts_with("embedded_") {
+            if let Ok(sub) = sqlx::query_as::<_, Subtitle>("SELECT * FROM subtitles WHERE id = $1")
+                .bind(sub_id)
+                .fetch_one(&*pool)
+                .await
+            {
+                if std::path::Path::new(&sub.file_path).exists() {
+                    return std::fs::read_to_string(&sub.file_path).map_err(|e| e.to_string());
+                }
+            }
+        }
+    }
+
+    // 2. If file_path is provided
+    if let Some(ref path) = file_path {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if ext == "srt" || ext == "vtt" || ext == "sub" {
+                return std::fs::read_to_string(p).map_err(|e| e.to_string());
+            }
+
+            // 3. If file is a video container (.mkv, .mp4, etc.) and an embedded track index is requested
+            let stream_idx = track_index.or_else(|| {
+                subtitle_id.as_ref().and_then(|id| {
+                    if id.starts_with("embedded_") {
+                        id.strip_prefix("embedded_").and_then(|s| s.parse::<usize>().ok())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            if let Some(idx) = stream_idx {
+                let ffmpeg = crate::media_engine::find_ffmpeg();
+                let mut cmd = tokio::process::Command::new(ffmpeg);
+                cmd.kill_on_drop(true);
+                cmd.args([
+                    "-v", "error",
+                    "-nostdin",
+                    "-threads", "2",
+                    "-y",
+                    "-i", path,
+                    "-map", &format!("0:s:{}", idx),
+                    "-f", "srt",
+                    "-"
+                ]);
+
+                let output_res = tokio::time::timeout(std::time::Duration::from_secs(6), cmd.output()).await;
+                if let Ok(Ok(output)) = output_res {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        return String::from_utf8(output.stdout)
+                            .map_err(|e| format!("Invalid UTF-8 in extracted subtitle: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    Err("Subtitle content could not be read or extracted".to_string())
+}
+
+#[tauri::command]
+pub async fn record_movie_played(pool: DbState<'_>, media_item_id: String) -> Result<(), String> {
+    sqlx::query("UPDATE media_items SET play_count = coalesce(play_count, 0) + 1 WHERE id = $1")
+        .bind(&media_item_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1139,7 +1348,12 @@ pub async fn open_app_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn quit_app(app: tauri::AppHandle, state: State<'_, TranscoderState>) -> Result<(), String> {
+    let mut lock = state.process.lock().await;
+    if let Some(mut child) = lock.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     app.exit(0);
     Ok(())
 }
@@ -1486,9 +1700,10 @@ pub async fn start_transcode(
     state: State<'_, TranscoderState>,
     file_path: String,
     start_time_sec: f64,
+    audio_track_index: Option<usize>,
 ) -> Result<String, String> {
     use std::sync::atomic::Ordering;
-    info!("start_transcode: file={} start_time_sec={}", file_path, start_time_sec);
+    info!("start_transcode: file={} start_time_sec={} audio_track={:?}", file_path, start_time_sec, audio_track_index);
 
     let hls_dir = app_handle.path().app_data_dir()
         .map_err(|e| e.to_string())?
@@ -1594,15 +1809,26 @@ pub async fn start_transcode(
     let segment_path_pattern = hls_dir.join("stream-%05d.ts").to_string_lossy().to_string();
     let m3u8_path_str = m3u8_path.to_string_lossy().to_string();
 
-    // 6. Build ffmpeg args — -ss BEFORE -i for fast keyframe seek
+    // 6. Build ffmpeg args — -ss BEFORE -i for fast keyframe seek with bounded threads and sliding window
     let mut args: Vec<String> = vec![
         "-y".into(),
+        "-nostdin".into(),
+        "-threads".into(), "4".into(),
         "-ss".into(), format!("{:.3}", start_time_sec),
         "-i".into(), file_path.clone(),
+    ];
+    // If a specific audio track was requested, add explicit stream mapping
+    if let Some(audio_idx) = audio_track_index {
+        args.extend([
+            "-map".into(), "0:v:0".into(),
+            "-map".into(), format!("0:a:{}", audio_idx),
+        ]);
+    }
+    args.extend([
         "-c:v".into(), "libx264".into(),
         "-preset".into(), "veryfast".into(),
         "-b:v".into(), if is_4k { "4000k".into() } else { "3000k".into() },
-    ];
+    ]);
     if is_4k {
         args.extend(["-vf".into(), "scale=-2:1080".into()]);
     }
@@ -1613,8 +1839,8 @@ pub async fn start_transcode(
         "-ar".into(), "44100".into(),
         "-f".into(), "hls".into(),
         "-hls_time".into(), "2".into(),
-        "-hls_list_size".into(), "0".into(),
-        "-hls_flags".into(), "delete_segments+append_list".into(),
+        "-hls_list_size".into(), "6".into(),
+        "-hls_flags".into(), "delete_segments+split_by_time".into(),
         "-hls_segment_filename".into(), segment_path_pattern,
         m3u8_path_str,
     ]);
@@ -1707,9 +1933,12 @@ pub async fn get_hls_status(state: State<'_, TranscoderState>) -> Result<HlsStat
 }
 
 #[tauri::command]
-pub async fn stop_transcode(state: State<'_, TranscoderState>) -> Result<(), String> {
+pub async fn stop_transcode(
+    app_handle: tauri::AppHandle,
+    state: State<'_, TranscoderState>
+) -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    info!("stop_transcode: killing ffmpeg transcoder process");
+    info!("stop_transcode: killing ffmpeg transcoder process and cleaning buffers");
 
     let mut lock = state.process.lock().await;
     if let Some(mut child) = lock.take() {
@@ -1720,26 +1949,27 @@ pub async fn stop_transcode(state: State<'_, TranscoderState>) -> Result<(), Str
     *file_lock = None;
     state.is_launching.store(false, Ordering::SeqCst);
 
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn open_in_vlc_app(file_path: String) -> Result<(), String> {
-    info!("Request to open media file directly in native VLC application: {}", file_path);
-    let media_http_url = format!("http://127.0.0.1:8098/media_file?path={}", url_encode(&file_path));
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg("-a")
-            .arg("VLC")
-            .arg(&media_http_url)
-            .spawn()
-            .map_err(|e| format!("Failed to open VLC app: {}", e))?;
+    if let Ok(data_dir) = app_handle.path().app_data_dir() {
+        let hls_dir = data_dir.join("hls_out");
+        if hls_dir.exists() {
+            let _ = std::fs::remove_dir_all(&hls_dir);
+        }
     }
 
     Ok(())
 }
+
+pub fn cleanup_orphaned_ffmpeg() {
+    #[cfg(unix)]
+    {
+        info!("Cleaning up any orphaned ffmpeg background processes...");
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "-f", "ffmpeg-aarch64-apple-darwin"])
+            .output();
+    }
+}
+
+
 
 pub fn start_hls_server(hls_dir: std::path::PathBuf) {
     use std::net::TcpListener;
@@ -1803,86 +2033,74 @@ pub fn start_hls_server(hls_dir: std::path::PathBuf) {
                 // Endpoint 0: HLS Manifest (.m3u8) Proxy with path cleanup
                 if path.ends_with(".m3u8") {
                     let file_path = hls_dir.join("stream.m3u8");
-                    if let Ok(raw_m3u8) = std::fs::read_to_string(&file_path) {
-                        let hls_dir_str = hls_dir.to_string_lossy().to_string();
-                        // Replace absolute filesystem segment paths with HTTP proxy URLs (ffmpeg writes absolute paths)
-                        let clean_m3u8 = raw_m3u8.replace(&hls_dir_str, "http://127.0.0.1:8098/hls");
-                        let bytes = clean_m3u8.as_bytes();
-                        let response_headers = format!(
-                            "HTTP/1.1 200 OK\r\n\
-                             Access-Control-Allow-Origin: *\r\n\
-                             Access-Control-Allow-Headers: *\r\n\
-                             Cache-Control: no-cache, no-store, must-revalidate\r\n\
-                             Content-Type: application/vnd.apple.mpegurl\r\n\
-                             Content-Length: {}\r\n\
-                             Connection: close\r\n\r\n",
-                            bytes.len()
-                        );
-                        let _ = stream.write_all(response_headers.as_bytes());
-                        if !is_head {
-                            let _ = stream.write_all(bytes);
+                    match std::fs::read_to_string(&file_path) {
+                        Ok(raw_m3u8) => {
+                            let hls_dir_str = hls_dir.to_string_lossy().to_string();
+                            // Replace absolute filesystem segment paths with HTTP proxy URLs (ffmpeg writes absolute paths)
+                            let clean_m3u8 = raw_m3u8.replace(&hls_dir_str, "http://127.0.0.1:8098/hls");
+                            let bytes = clean_m3u8.as_bytes();
+                            let response_headers = format!(
+                                "HTTP/1.1 200 OK\r\n\
+                                 Access-Control-Allow-Origin: *\r\n\
+                                 Access-Control-Allow-Headers: *\r\n\
+                                 Cache-Control: no-cache, no-store, must-revalidate\r\n\
+                                 Content-Type: application/vnd.apple.mpegurl\r\n\
+                                 Content-Length: {}\r\n\
+                                 Connection: close\r\n\r\n",
+                                bytes.len()
+                            );
+                            let _ = stream.write_all(response_headers.as_bytes());
+                            if !is_head {
+                                let _ = stream.write_all(bytes);
+                            }
                         }
-                        return;
+                        Err(_) => {
+                            // Stream not ready yet — return 503 with CORS so browser retries cleanly
+                            let response = "HTTP/1.1 503 Service Unavailable\r\n\
+                                            Access-Control-Allow-Origin: *\r\n\
+                                            Access-Control-Allow-Headers: *\r\n\
+                                            Retry-After: 1\r\n\
+                                            Cache-Control: no-cache\r\n\
+                                            Connection: close\r\n\r\n";
+                            let _ = stream.write_all(response.as_bytes());
+                        }
                     }
+                    return;
                 }
 
                 // Endpoint 0.1: TS Video Segment Proxy (.ts)
                 if path.ends_with(".ts") {
                     let rel_filename = path.rsplit('/').next().unwrap_or("stream-00000.ts");
+                    if rel_filename.contains("..") || rel_filename.contains('\\') {
+                        let response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes());
+                        return;
+                    }
                     let file_path = hls_dir.join(rel_filename);
 
-                    // Canonical security check: prevent directory traversal outside hls_out
-                    if let (Ok(canonical_hls), Ok(canonical_target)) = (hls_dir.canonicalize(), file_path.canonicalize()) {
-                        if !canonical_target.starts_with(&canonical_hls) {
-                            let response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
-                            let _ = stream.write_all(response.as_bytes());
-                            return;
-                        }
-                    }
-
-                    let mut file = match std::fs::File::open(&file_path) {
-                        Ok(f) => f,
-                        Err(_) => {
+                    let data = match std::fs::read(&file_path) {
+                        Ok(bytes) if !bytes.is_empty() => bytes,
+                        _ => {
                             let response = "HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
                             let _ = stream.write_all(response.as_bytes());
                             return;
                         }
                     };
 
-                    let wait_start = std::time::Instant::now();
-                    while file.metadata().map(|m| m.len()).unwrap_or(0) < 65536 {
-                        if wait_start.elapsed().as_millis() > 1000 {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-
-                    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
                     let response_headers = format!(
                         "HTTP/1.1 200 OK\r\n\
                          Access-Control-Allow-Origin: *\r\n\
                          Access-Control-Allow-Headers: *\r\n\
                          Cache-Control: no-cache, no-store, must-revalidate\r\n\
-                         Content-Type: video/MP2T\r\n\
+                         Content-Type: video/mp2t\r\n\
                          Content-Length: {}\r\n\
                          Connection: close\r\n\r\n",
-                        file_size
+                        data.len()
                     );
 
-                    if let Err(_) = stream.write_all(response_headers.as_bytes()) {
-                        return;
-                    }
-
-                    if is_head {
-                        return;
-                    }
-
-                    let mut buf = [0u8; 65536];
-                    while let Ok(n) = file.read(&mut buf) {
-                        if n == 0 { break; }
-                        if let Err(_) = stream.write_all(&buf[..n]) {
-                            break;
-                        }
+                    let _ = stream.write_all(response_headers.as_bytes());
+                    if !is_head {
+                        let _ = stream.write_all(&data);
                     }
                     return;
                 }
@@ -2048,7 +2266,10 @@ pub fn start_hls_server(hls_dir: std::path::PathBuf) {
                 let file_path = hls_dir.join(clean_path);
 
                 if !file_path.exists() || !file_path.is_file() {
-                    let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                    let response = "HTTP/1.1 404 Not Found\r\n\
+                                    Access-Control-Allow-Origin: *\r\n\
+                                    Access-Control-Allow-Headers: *\r\n\
+                                    Connection: close\r\n\r\n";
                     let _ = stream.write_all(response.as_bytes());
                     return;
                 }
@@ -2109,15 +2330,6 @@ pub async fn open_tv_window(app_handle: tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct Av1CandidateDetails {
-    pub is_candidate: bool,
-    pub is_pristine_remux: bool,
-    pub reason: String,
-    pub estimated_savings_pct: u32,
-    pub file_size_gb: f64,
-}
-
 #[tauri::command]
 pub async fn get_video_quality_score(file_path: String) -> Result<crate::models::VideoQualityScore, String> {
     crate::media_engine::compute_video_quality_score(&file_path).await
@@ -2147,199 +2359,4 @@ pub async fn list_media_streams(path: String) -> Result<serde_json::Value, Strin
 #[tauri::command]
 pub async fn extract_media_thumbnail(path: String, timestamp: f64) -> Result<String, String> {
     crate::media_engine::extract_thumbnail_frame(&path, timestamp).await
-}
-
-#[tauri::command]
-pub async fn evaluate_av1_candidate(file_path: String) -> Result<Av1CandidateDetails, String> {
-    let path = std::path::Path::new(&file_path);
-    if !path.exists() {
-        return Err("File does not exist".to_string());
-    }
-
-    let file_size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let file_size_gb = (file_size_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
-
-    let path_lower = file_path.to_lowercase();
-    let is_remux = file_size_gb >= 25.0 || path_lower.contains("remux") || path_lower.contains("2160p.bluray");
-
-    if is_remux {
-        return Ok(Av1CandidateDetails {
-            is_candidate: false,
-            is_pristine_remux: true,
-            reason: "Pristine Source (4K UHD Blu-ray REMUX master quality protected)".to_string(),
-            estimated_savings_pct: 0,
-            file_size_gb,
-        });
-    }
-
-    let is_already_av1 = path_lower.contains("av1") || path_lower.ends_with(".av1");
-    if is_already_av1 {
-        return Ok(Av1CandidateDetails {
-            is_candidate: false,
-            is_pristine_remux: false,
-            reason: "File is already in AV1 format".to_string(),
-            estimated_savings_pct: 0,
-            file_size_gb,
-        });
-    }
-
-    // High value candidates: H.264, MPEG-2, XviD, legacy web/HDTV files
-    let is_high_value = path_lower.ends_with(".mp4")
-        || path_lower.ends_with(".mkv")
-        || path_lower.ends_with(".avi")
-        || path_lower.ends_with(".wmv")
-        || path_lower.ends_with(".mpg")
-        || path_lower.ends_with(".mpeg")
-        || path_lower.contains("h264")
-        || path_lower.contains("x264")
-        || path_lower.contains("xvid")
-        || path_lower.contains("hdtv");
-
-    if is_high_value {
-        Ok(Av1CandidateDetails {
-            is_candidate: true,
-            is_pristine_remux: false,
-            reason: "High Candidate: Legacy encoding (H.264/MPEG-2/XviD) will yield ~50-60% storage savings with zero visible quality loss.".to_string(),
-            estimated_savings_pct: 55,
-            file_size_gb,
-        })
-    } else {
-        Ok(Av1CandidateDetails {
-            is_candidate: true,
-            is_pristine_remux: false,
-            reason: "Candidate: File can be compressed to AV1 to save ~35% storage.".to_string(),
-            estimated_savings_pct: 35,
-            file_size_gb,
-        })
-    }
-}
-
-#[tauri::command]
-pub async fn transcode_to_av1(
-    app_handle: tauri::AppHandle,
-    file_path: String
-) -> Result<String, String> {
-    info!("Request to transcode file to optimized format: {}", file_path);
-
-    let eval = evaluate_av1_candidate(file_path.clone()).await?;
-    if eval.is_pristine_remux {
-        return Err("4K UHD Blu-ray REMUX files are protected from transcoding to preserve master quality.".to_string());
-    }
-
-    let input_path = std::path::Path::new(&file_path);
-    let parent_dir = input_path.parent().unwrap_or(std::path::Path::new("."));
-    let stem = input_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "optimized_media".to_string());
-    let output_file = parent_dir.join(format!("{}_AV1.mp4", stem));
-
-    let input_size = std::fs::metadata(input_path).map(|m| m.len()).unwrap_or(100_000_000);
-
-    // Smart Probe to evaluate media resolution and select optimal target bitrate
-    let probe_target_vb = if file_path.contains("1080p") || file_path.contains("FHD") {
-        1200
-    } else if file_path.contains("720p") || file_path.contains("HD") {
-        750
-    } else if file_path.contains("2160p") || file_path.contains("4K") {
-        3200
-    } else {
-        1000
-    };
-
-    let vlc_bin = "/Applications/VLC.app/Contents/MacOS/VLC";
-    if !std::path::Path::new(vlc_bin).exists() {
-        return Err("VLC Media Player is not installed at /Applications/VLC.app".to_string());
-    }
-
-    let sout_str = format!(
-        "#transcode{{vcodec=h264,vb={},chroma=I420,acodec=mp3,ab=128,channels=2,samplerate=44100,soverlay=0}}:std{{access=file,mux=mp4,dst='{}'}}",
-        probe_target_vb,
-        output_file.to_string_lossy()
-    );
-
-    #[derive(serde::Serialize, Clone)]
-    struct Av1ProgressPayload {
-        file_path: String,
-        status: String,
-        progress: u32,
-        eta_str: String,
-    }
-
-    let _ = app_handle.emit("av1-progress", Av1ProgressPayload {
-        file_path: file_path.clone(),
-        status: "Starting media transcode engine...".to_string(),
-        progress: 5,
-        eta_str: "Calculating...".to_string(),
-    });
-
-    let mut child = std::process::Command::new(vlc_bin)
-        .arg("-I")
-        .arg("dummy")
-        .arg("--ignore-config")
-        .arg("--aout=dummy")
-        .arg("--no-spu")
-        .arg("--no-osd")
-        .arg("--no-stats")
-        .arg("--no-sub-autodetect-file")
-        .arg("--no-mkv-preload-clusters")
-        .arg("--sout")
-        .arg(sout_str)
-        .arg(&file_path)
-        .arg("--play-and-exit")
-        .spawn()
-        .map_err(|e| format!("Transcode process failed: {}", e))?;
-
-    // Poll until output file is generated and process finishes
-    let start = std::time::Instant::now();
-    loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            if !status.success() && !output_file.exists() {
-                return Err(format!("Transcode process exited with status: {}", status));
-            }
-            break;
-        }
-
-        if output_file.exists() {
-            let len = std::fs::metadata(&output_file).map(|m| m.len()).unwrap_or(0);
-            if len > 1024 {
-                // Target size estimated at ~45% of input file size
-                let target_est = (input_size as f64 * 0.45).max(10_000_000.0);
-                let pct = ((len as f64 / target_est) * 100.0).clamp(5.0, 98.0) as u32;
-
-                let elapsed_sec = start.elapsed().as_secs_f64();
-                let eta_sec = if pct > 3 {
-                    let total_est_sec = elapsed_sec / (pct as f64 / 100.0);
-                    (total_est_sec - elapsed_sec).max(0.0) as u64
-                } else {
-                    0u64
-                };
-                let eta_formatted = if eta_sec > 0 {
-                    format!("{:02}m {:02}s", eta_sec / 60, eta_sec % 60)
-                } else {
-                    "Calculating...".to_string()
-                };
-
-                let _ = app_handle.emit("av1-progress", Av1ProgressPayload {
-                    file_path: file_path.clone(),
-                    status: format!("Encoding: {:.1} MB created ({}%)", len as f64 / 1_048_576.0, pct),
-                    progress: pct,
-                    eta_str: eta_formatted,
-                });
-            }
-        }
-
-        if start.elapsed().as_secs() > 1800 {
-            let _ = child.kill();
-            return Err("Transcode process timed out after 30 minutes".to_string());
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    let _ = app_handle.emit("av1-progress", Av1ProgressPayload {
-        file_path: file_path.clone(),
-        status: "Media optimization complete!".to_string(),
-        progress: 100,
-        eta_str: "00m 00s".to_string(),
-    });
-
-    Ok(output_file.to_string_lossy().to_string())
 }

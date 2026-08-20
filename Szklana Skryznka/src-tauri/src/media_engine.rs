@@ -35,16 +35,20 @@ pub struct FrameMetrics {
 
 pub async fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
     let exe = find_ffprobe();
-    let output = tokio::process::Command::new(exe)
-        .args([
-            "-v", "error",
-            "-show_entries", "format=duration,bit_rate",
-            "-show_entries", "stream=codec_type,codec_name,width,height,channels,r_frame_rate,tags,color_space,color_transfer,color_primaries,profile,level,sample_rate",
-            "-of", "json",
-            file_path
-        ])
-        .output()
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "-v", "error",
+        "-nostdin",
+        "-show_entries", "format=duration,bit_rate,size,format_name,format_long_name,tags",
+        "-show_entries", "stream=index,codec_type,codec_name,codec_long_name,width,height,channels,channel_layout,bit_rate,r_frame_rate,sample_rate,tags,color_space,color_transfer,color_primaries,profile,level,disposition",
+        "-of", "json",
+        file_path
+    ]);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(12), cmd.output())
         .await
+        .map_err(|_| "ffprobe execution timed out after 12 seconds".to_string())?
         .map_err(|e| format!("Failed to execute ffprobe: {}", e))?;
 
     if !output.status.success() {
@@ -62,17 +66,22 @@ pub async fn run_ffprobe_json(file_path: &str) -> Result<Value, String> {
 
 pub async fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result<FrameMetrics, String> {
     let exe = find_ffmpeg();
-    let output = tokio::process::Command::new(exe)
-        .args([
-            "-ss", &format!("{:.2}", timestamp),
-            "-i", file_path,
-            "-vframes", "1",
-            "-vf", "blurdetect,blockdetect,metadata=print:file=-",
-            "-f", "null",
-            "-"
-        ])
-        .output()
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "-nostdin",
+        "-threads", "2",
+        "-ss", &format!("{:.2}", timestamp),
+        "-i", file_path,
+        "-vframes", "1",
+        "-vf", "blurdetect,blockdetect,metadata=print:file=-",
+        "-f", "null",
+        "-"
+    ]);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
         .await
+        .map_err(|_| "ffmpeg frame metrics timed out after 10 seconds".to_string())?
         .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;
 
     if !output.status.success() {
@@ -108,16 +117,21 @@ pub async fn run_ffmpeg_frame_metrics(file_path: &str, timestamp: f64) -> Result
 
 pub async fn run_ffmpeg_ebur128(file_path: &str) -> Result<f64, String> {
     let exe = find_ffmpeg();
-    let output = tokio::process::Command::new(exe)
-        .args([
-            "-t", "10",
-            "-i", file_path,
-            "-filter_complex", "ebur128=peak=true",
-            "-f", "null",
-            "-"
-        ])
-        .output()
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "-nostdin",
+        "-threads", "2",
+        "-t", "10",
+        "-i", file_path,
+        "-filter_complex", "ebur128=peak=true",
+        "-f", "null",
+        "-"
+    ]);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output())
         .await
+        .map_err(|_| "ffmpeg ebur128 timed out after 15 seconds".to_string())?
         .map_err(|e| format!("Failed to execute ffmpeg ebur128: {}", e))?;
     
     let stderr_str = String::from_utf8_lossy(&output.stderr);
@@ -330,17 +344,22 @@ pub async fn extract_thumbnail_frame(file_path: &str, timestamp_sec: f64) -> Res
     let _ = std::fs::create_dir_all(&out_dir);
     let out_file = out_dir.join(format!("thumb_{}.jpg", uuid::Uuid::new_v4()));
 
-    let output = tokio::process::Command::new(exe)
-        .args([
-            "-ss", &format!("{:.2}", timestamp_sec),
-            "-i", file_path,
-            "-vframes", "1",
-            "-q:v", "2",
-            "-y",
-            out_file.to_str().unwrap_or("")
-        ])
-        .output()
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "-nostdin",
+        "-threads", "2",
+        "-ss", &format!("{:.2}", timestamp_sec),
+        "-i", file_path,
+        "-vframes", "1",
+        "-q:v", "2",
+        "-y",
+        out_file.to_str().unwrap_or("")
+    ]);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output())
         .await
+        .map_err(|_| "Thumbnail extraction timed out after 8 seconds".to_string())?
         .map_err(|e| format!("Thumbnail generation failed: {}", e))?;
 
     if !output.status.success() || !out_file.exists() {
@@ -394,12 +413,18 @@ pub async fn probe_universal_media(file_path: &str) -> Result<UniversalMediaInfo
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
     let mut subtitle_streams = Vec::new();
+    let mut subtitle_counter: usize = 0;
 
     if let Some(arr) = streams_arr {
         for (idx, stream) in arr.iter().enumerate() {
             let codec_type = stream.get("codec_type").and_then(|c| c.as_str()).unwrap_or("");
             let codec_name = stream.get("codec_name").and_then(|c| c.as_str()).unwrap_or("unknown").to_string();
             let codec_long_name = stream.get("codec_long_name").and_then(|c| c.as_str()).unwrap_or(&codec_name).to_string();
+            let stream_index = stream.get("index").and_then(|i| i.as_u64()).unwrap_or(idx as u64) as usize;
+            let disposition = stream.get("disposition");
+            let is_stream_default = disposition.and_then(|d| d.get("default")).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+            let is_stream_forced = disposition.and_then(|d| d.get("forced")).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+            let stream_title = stream.get("tags").and_then(|t| t.get("title")).and_then(|v| v.as_str()).map(|s| s.to_string());
 
             match codec_type {
                 "video" => {
@@ -411,7 +436,7 @@ pub async fn probe_universal_media(file_path: &str) -> Result<UniversalMediaInfo
                     let is_hdr = color_transfer.contains("smpte2084") || color_transfer.contains("arib-std-b67");
 
                     video_streams.push(VideoStreamInfo {
-                        index: idx,
+                        index: stream_index,
                         codec_name,
                         codec_long_name,
                         profile,
@@ -430,27 +455,45 @@ pub async fn probe_universal_media(file_path: &str) -> Result<UniversalMediaInfo
                     let sample_rate = stream.get("sample_rate").and_then(|s| s.as_str()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(44100);
                     let channels = stream.get("channels").and_then(|c| c.as_u64()).unwrap_or(2) as u32;
                     let lang = stream.get("tags").and_then(|t| t.get("language")).and_then(|l| l.as_str()).unwrap_or("und").to_string();
+                    let channel_layout = stream.get("channel_layout").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    let real_layout = if !channel_layout.is_empty() {
+                        channel_layout
+                    } else if channels >= 8 {
+                        "7.1".to_string()
+                    } else if channels >= 6 {
+                        "5.1".to_string()
+                    } else if channels == 1 {
+                        "Mono".to_string()
+                    } else {
+                        "Stereo".to_string()
+                    };
+                    let stream_bitrate = stream.get("bit_rate").and_then(|b| b.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
 
                     audio_streams.push(AudioStreamInfo {
-                        index: idx,
+                        index: stream_index,
                         codec_name,
                         codec_long_name,
                         sample_rate,
                         channels,
-                        channel_layout: if channels == 6 { "5.1".to_string() } else { "Stereo".to_string() },
+                        channel_layout: real_layout,
                         language: lang,
-                        bitrate: 192_000,
+                        bitrate: stream_bitrate,
+                        title: stream_title,
+                        is_default: is_stream_default,
                     });
                 }
                 "subtitle" => {
                     let lang = stream.get("tags").and_then(|t| t.get("language")).and_then(|l| l.as_str()).unwrap_or("und").to_string();
                     subtitle_streams.push(SubtitleStreamInfo {
-                        index: idx,
+                        index: stream_index,
+                        subtitle_stream_index: subtitle_counter,
                         codec_name,
                         language: lang,
-                        is_default: false,
-                        is_forced: false,
+                        title: stream_title,
+                        is_default: is_stream_default,
+                        is_forced: is_stream_forced,
                     });
+                    subtitle_counter += 1;
                 }
                 _ => {}
             }

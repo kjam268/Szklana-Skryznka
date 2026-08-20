@@ -32,6 +32,8 @@ export const Grid: React.FC = () => {
   const [draggedOverCell, setDraggedOverCell] = useState<{ dayIdx: number; slotIdx: number; isBottomHalf: boolean } | null>(null);
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [draggedOriginEntryId, setDraggedOriginEntryId] = useState<string | null>(null);
+  const draggedMediaItemIdRef = useRef<string | null>(null);
+  const draggedOriginEntryIdRef = useRef<string | null>(null);
   const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Animation", "Shorts", "Favorites", "Kids", "Classic", "Not Found"];
 
   const activeChannelId = channels[0]?.id || "chan_default";
@@ -382,14 +384,6 @@ export const Grid: React.FC = () => {
                         const isDraggedOver = draggedOverCell?.dayIdx === dayIdx && draggedOverCell?.slotIdx === slotIdx;
                         const hoveredIsBottomHalf = isDraggedOver && draggedOverCell?.isBottomHalf;
 
-                        // Calculate display time showing 15 minutes slip on hover
-                        let activeTimeStr = timeStr;
-                        if (isDraggedOver) {
-                          const baseMinutes = isHalfHour ? 30 : 0;
-                          const activeMinutes = baseMinutes + (hoveredIsBottomHalf ? 15 : 0);
-                          activeTimeStr = hour.toString().padStart(2, "0") + ":" + activeMinutes.toString().padStart(2, "0");
-                        }
-
                         const cellStart = new Date(dayStart.getTime() + slotIdx * 30 * 60 * 1000);
                         const cellEnd = new Date(dayStart.getTime() + (slotIdx + 1) * 30 * 60 * 1000);
                         const isCovered = dayEntries.some((entry) => {
@@ -425,7 +419,7 @@ export const Grid: React.FC = () => {
                               e.preventDefault();
                               const isBottom = draggedOverCell?.isBottomHalf || false;
                               setDraggedOverCell(null);
-                              const mediaItemId = e.dataTransfer.getData("text/plain") || draggedItemId;
+                              const mediaItemId = e.dataTransfer.getData("text/plain") || draggedItemId || draggedMediaItemIdRef.current;
                               if (!mediaItemId) {
                                 showToast("Failed to schedule: No media item ID was dragged", "error");
                                 return;
@@ -465,7 +459,7 @@ export const Grid: React.FC = () => {
                                 });
 
                                 // Delete original entry if we dragged an existing scheduled card
-                                const originId = e.dataTransfer.getData("originEntryId") || draggedOriginEntryId;
+                                const originId = e.dataTransfer.getData("originEntryId") || draggedOriginEntryId || draggedOriginEntryIdRef.current;
                                 if (originId) {
                                   await invoke("delete_schedule_entry", { entryId: originId });
                                 }
@@ -500,7 +494,7 @@ export const Grid: React.FC = () => {
                             } transition-all duration-200 relative bg-gradient-to-br border-l border-gray-900/20 ${
                               isHalfHour ? "border-b border-dashed border-gray-800/30" : "border-b border-solid border-gray-800/60"
                             } ${
-                              isDraggedOver ? "bg-accent/15 border-accent/60 border z-20 scale-[0.98] shadow-[0_0_12px_rgba(6,182,212,0.3)]" : blockColor
+                              isDraggedOver ? "bg-accent/15 border-accent/60 border z-10 scale-[0.99] shadow-[0_0_15px_rgba(6,182,212,0.35)]" : blockColor
                             }`}
                           >
                             {/* Dotted horizontal splitter line */}
@@ -510,27 +504,84 @@ export const Grid: React.FC = () => {
 
                             {/* Hover highlights for active 15-minute sub-slot */}
                             {isDraggedOver && !hoveredIsBottomHalf && (
-                              <div className="absolute top-0 left-0 right-0 bottom-1/2 bg-accent/15 pointer-events-none z-10" />
+                              <div className="absolute top-0 left-0 right-0 bottom-1/2 bg-accent/20 pointer-events-none z-10" />
                             )}
                             {isDraggedOver && hoveredIsBottomHalf && (
-                              <div className="absolute top-1/2 left-0 right-0 bottom-0 bg-accent/15 pointer-events-none z-10" />
+                              <div className="absolute top-1/2 left-0 right-0 bottom-0 bg-accent/20 pointer-events-none z-10" />
                             )}
 
                             <span 
-                              className={`select-none font-bold tracking-tighter leading-none transition-all duration-150 z-20 pointer-events-none ${
-                                isDraggedOver 
-                                  ? "text-[20px] text-accent font-bold" 
-                                  : (isCovered 
-                                      ? `text-[18px] opacity-40 font-extrabold ${textColor}` 
-                                      : `text-[32px] ${textColor}`)
+                              className={`select-none font-bold tracking-tighter leading-none transition-all duration-150 z-10 pointer-events-none ${
+                                isCovered 
+                                  ? `text-[18px] opacity-40 font-extrabold ${textColor}` 
+                                  : `text-[32px] ${textColor}`
                               }`}
                               style={{ fontFamily: "'PT Sans', sans-serif" }}
                             >
-                              {activeTimeStr}
+                              {timeStr}
                             </span>
                           </div>
                         );
                       })}
+
+                      {/* Live Drag Ghost Card Preview (renders full movie/tv show card on drag hover) */}
+                      {draggedOverCell && draggedOverCell.dayIdx === dayIdx && (() => {
+                        const draggedMediaId = draggedItemId || draggedMediaItemIdRef.current;
+                        const draggedAsset = items.find(x => x.item.id === draggedMediaId);
+                        if (!draggedAsset) return null;
+
+                        const isBottom = draggedOverCell.isBottomHalf;
+                        const previewStartSlot = draggedOverCell.slotIdx + (isBottom ? 0.5 : 0);
+                        const previewTopPx = previewStartSlot * 64;
+                        const previewDurationSec = Math.max(draggedAsset.item.runtime || 0, 3960);
+                        const previewHeightPx = (previewDurationSec / 1800) * 64;
+                        const previewStartTime = new Date(dayStart.getTime() + previewStartSlot * 30 * 60 * 1000);
+                        const previewEndTime = new Date(previewStartTime.getTime() + previewDurationSec * 1000);
+
+                        const formatTimeStr = (date: Date) => {
+                          return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+                        };
+
+                        return (
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: `${previewTopPx}px`,
+                              height: `${previewHeightPx}px`,
+                              minHeight: "140px",
+                              left: "4%",
+                              right: "4%",
+                              pointerEvents: "none"
+                            }}
+                            className="z-30 rounded-lg border-2 border-accent bg-cyan-950/85 backdrop-blur-md p-2 flex flex-col items-center justify-start text-center overflow-hidden shadow-[0_0_25px_rgba(6,182,212,0.5)] animate-pulse"
+                          >
+                            {/* Poster thumbnail */}
+                            <div className="w-full max-w-[100px] aspect-[2/3] bg-black/60 rounded overflow-hidden mb-1.5 border border-cyan-400/40 flex items-center justify-center shrink min-h-0 shadow-lg">
+                              <img
+                                src={draggedAsset.item.poster_path ? getPosterUrl(draggedAsset.item.poster_path) : getFallbackPosterUrl(draggedAsset.item.id)}
+                                alt={draggedAsset.item.title}
+                                className="w-full h-full object-contain"
+                              />
+                            </div>
+
+                            {/* Details text */}
+                            <div className="w-full shrink-0 flex flex-col items-center space-y-1">
+                              <span className="font-bold text-[10px] text-cyan-200 line-clamp-2 leading-tight">
+                                {draggedAsset.item.title}
+                              </span>
+                              <span className="text-[8.5px] text-cyan-400 font-mono block leading-none font-bold">
+                                {formatTimeStr(previewStartTime)} - {formatTimeStr(previewEndTime)}
+                              </span>
+                              <span className="text-[8.5px] text-gray-300 font-mono block leading-none font-bold">
+                                {formatRuntime(draggedAsset.item.runtime)}
+                              </span>
+                              <span className="text-[7.5px] uppercase tracking-wider bg-accent/20 border border-accent/40 px-1.5 py-0.5 rounded font-bold text-accent font-mono">
+                                {draggedAsset.item.media_type}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {/* Scheduled overlay cards */}
                       {dayEntries.map((details) => {
@@ -611,6 +662,8 @@ export const Grid: React.FC = () => {
                               WebkitUserDrag: "element"
                             } as React.CSSProperties}
                             onDragStart={(e) => {
+                              draggedMediaItemIdRef.current = details.media_item_id;
+                              draggedOriginEntryIdRef.current = details.id;
                               setDraggedItemId(details.media_item_id);
                               setDraggedOriginEntryId(details.id);
                               e.dataTransfer.setData("text/plain", details.media_item_id);
@@ -618,6 +671,8 @@ export const Grid: React.FC = () => {
                               e.dataTransfer.effectAllowed = "move";
                             }}
                             onDragEnd={() => {
+                              draggedMediaItemIdRef.current = null;
+                              draggedOriginEntryIdRef.current = null;
                               setDraggedItemId(null);
                               setDraggedOriginEntryId(null);
                               setDraggedOverCell(null);
@@ -673,6 +728,23 @@ export const Grid: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* RIGHT EDGE HOVER HOT-ZONE (Reopens library drawer on edge hover or drag) */}
+      {!isDrawerOpen && (
+        <div 
+          onMouseEnter={() => setIsDrawerOpen(true)}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDrawerOpen(true);
+          }}
+          className="absolute right-0 top-0 bottom-0 w-4 hover:w-8 z-30 cursor-pointer flex items-center justify-end group transition-all duration-150"
+          title="Hover right edge to open Library drawer"
+        >
+          <div className="w-1.5 h-16 bg-accent/30 rounded-l group-hover:bg-accent group-hover:h-24 group-hover:w-2 transition-all shadow-[0_0_12px_rgba(6,182,212,0.6)] flex items-center justify-center">
+            <ChevronLeft size={10} className="text-black opacity-0 group-hover:opacity-100 transition-opacity -ml-0.5" />
+          </div>
+        </div>
+      )}
 
       {/* COLLAPSIBLE SIDEBAR DRAWER */}
       <div 
@@ -782,11 +854,17 @@ export const Grid: React.FC = () => {
                               draggable={true}
                               style={{ WebkitUserDrag: "element" } as React.CSSProperties}
                               onDragStart={(e) => {
+                                draggedMediaItemIdRef.current = details.item.id;
                                 setDraggedItemId(details.item.id);
                                 e.dataTransfer.setData("text/plain", details.item.id);
                                 e.dataTransfer.effectAllowed = "move";
+                                setTimeout(() => {
+                                  setIsDrawerOpen(false);
+                                }, 100);
                               }}
                               onDragEnd={() => {
+                                draggedMediaItemIdRef.current = null;
+                                draggedOriginEntryIdRef.current = null;
                                 setDraggedItemId(null);
                                 setDraggedOverCell(null);
                               }}
@@ -910,11 +988,17 @@ export const Grid: React.FC = () => {
                       draggable={true}
                       style={{ WebkitUserDrag: "element" } as React.CSSProperties}
                       onDragStart={(e) => {
+                        draggedMediaItemIdRef.current = details.item.id;
                         setDraggedItemId(details.item.id);
                         e.dataTransfer.setData("text/plain", details.item.id);
                         e.dataTransfer.effectAllowed = "move";
+                        setTimeout(() => {
+                          setIsDrawerOpen(false);
+                        }, 100);
                       }}
                       onDragEnd={() => {
+                        draggedMediaItemIdRef.current = null;
+                        draggedOriginEntryIdRef.current = null;
                         setDraggedItemId(null);
                         setDraggedOverCell(null);
                       }}

@@ -1077,33 +1077,33 @@ pub fn calculate_quality_score(
     };
 
     if height >= 2160 {
-        score += 400; // 4K
+        score += 500; // 4K / UHD
     } else if height >= 1080 {
-        score += 300; // 1080p
+        score += 200; // Full HD 1080p
     } else if height >= 720 {
-        score += 200; // 720p
+        score += 100; // HD 720p
     } else {
-        score += 100; // Standard definition baseline
+        score += 50;  // Standard definition baseline
     }
 
-    // 2. Bitrate (progressive scaling)
+    // 2. Video Bitrate (10 points per Mbps)
     if let Some(bitrate_bps) = video_bitrate {
         let mbps = (bitrate_bps as f64) / 1_000_000.0;
-        let bitrate_points = (mbps * 15.0) as i32;
+        let bitrate_points = (mbps * 10.0) as i32;
         score += bitrate_points.min(300); // capped at 300 points
     }
 
     // 3. Video Codec Efficiency
     let v_codec = video_codec.to_uppercase();
     if v_codec.contains("HEVC") || v_codec.contains("H265") || v_codec.contains("H.265") || v_codec.contains("AV1") {
-        score += 100;
+        score += 50;
     } else if v_codec.contains("H264") || v_codec.contains("H.264") || v_codec.contains("AVC") {
-        score += 60;
-    } else {
         score += 30;
+    } else {
+        score += 10;
     }
 
-    // 4. HDR / Color Telemetry Features
+    // 4. Color Depth / HDR Telemetry Features
     let color_space_lower = color_space.to_lowercase();
     let color_transfer_lower = color_transfer.to_lowercase();
     let color_primaries_lower = color_primaries.to_lowercase();
@@ -1114,7 +1114,7 @@ pub fn calculate_quality_score(
         || v_codec.contains("10BIT")
         || v_codec.contains("HDR")
     {
-        score += 50; // HDR / BT2020 bonus
+        score += 50; // 10-bit color / HDR bonus
     }
 
     // 5. Video Codec Profile & Level
@@ -1126,26 +1126,26 @@ pub fn calculate_quality_score(
     }
 
     if video_level >= 41 {
-        score += 10; // high level (e.g. H264 level 4.1+ / HEVC level 5.0+)
+        score += 10; // high level
     }
 
     // 6. Audio Channels
     let channels = audio_channels.unwrap_or(2);
     if channels >= 8 {
-        score += 100; // 7.1
+        score += 150; // 7.1 Surround
     } else if channels >= 6 {
-        score += 100; // 5.1
+        score += 100; // 5.1 Surround
     } else if channels >= 2 {
-        score += 60;  // Stereo
+        score += 50;  // Stereo
     } else if channels >= 1 {
-        score += 30;  // Mono
+        score += 20;  // Mono
     }
 
     // 7. Audio Codec Quality
     let a_codec = audio_codec.to_uppercase();
     if a_codec.contains("DTS") || a_codec.contains("TRUEHD") || a_codec.contains("ATMOS") {
         score += 50;
-    } else if a_codec.contains("AAC") || a_codec.contains("AC3") || a_codec.contains("MP3") {
+    } else if a_codec.contains("AAC") || a_codec.contains("AC3") || a_codec.contains("EAC3") || a_codec.contains("OPUS") {
         score += 30;
     } else {
         score += 10;
@@ -1168,23 +1168,20 @@ pub fn calculate_quality_score(
         }
     }
 
-    // 10. EBU R128 loudness correction
+    // 10. EBU R128 Loudness Bonus
     if let Some(loudness) = ebur128_loudness {
         if loudness >= -30.0 && loudness <= -12.0 {
             score += 20;
         }
     }
 
-    // 11. VMAF Perceptual Quality Score integration
-    let mut final_score = (score as f64) / 10.0;
+    // 11. Final score calculation & VMAF blending
+    let mut final_score = ((score as f64) / 10.0).clamp(0.0, 100.0);
     if let Some(vmaf) = vmaf_score {
-        final_score = (vmaf * 0.7) + (final_score * 0.3);
+        final_score = ((vmaf * 0.7) + (final_score * 0.3)).clamp(0.0, 100.0);
     }
 
-    if final_score > 100.0 {
-        final_score = 100.0;
-    }
-    final_score
+    (final_score * 10.0).round() / 10.0
 }
 
 pub async fn deduplicate_database(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

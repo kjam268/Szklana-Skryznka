@@ -19,6 +19,41 @@ export interface MediaItem {
   rt_score?: string;
   imdb_score?: string;
   imdb_id?: string;
+  play_count?: number;
+}
+
+export interface SubtitleRecordInfo {
+  id: string;
+  media_item_id: string;
+  language: string;
+  label: string;
+  subtitle_type: string;
+  file_path?: string;
+  track_index?: number;
+  is_default: number;
+}
+
+export interface AudioStreamInfo {
+  index: number;
+  codec_name: string;
+  codec_long_name: string;
+  sample_rate: number;
+  channels: number;
+  channel_layout: string;
+  language: string;
+  bitrate: number;
+  title?: string;
+  is_default: boolean;
+}
+
+export interface SubtitleStreamInfo {
+  index: number;
+  subtitle_stream_index: number;
+  codec_name: string;
+  language: string;
+  title?: string;
+  is_default: boolean;
+  is_forced: boolean;
 }
 
 export interface MediaFile {
@@ -56,6 +91,19 @@ export interface Subtitle {
   subtitle_type: string;
   file_path: string;
   is_default: number;
+}
+
+export interface AnalysisJob {
+  id: string;
+  media_file_id: string;
+  file_path: string;
+  job_type: string;
+  status: "pending" | "running" | "completed" | "failed";
+  progress_percent: number;
+  result_json?: string;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface MediaItemDetails {
@@ -404,5 +452,63 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
   dismissToast: (id) => set((state) => ({
     toasts: state.toasts.filter((t) => t.id !== id),
   })),
+}));
+
+// --- ANALYSIS QUEUE STORE ---
+interface AnalysisStore {
+  jobs: AnalysisJob[];
+  activeProgress: { [mediaFileId: string]: { progress: number; stage: string; filename: string } };
+  isLoading: boolean;
+  fetchQueue: () => Promise<void>;
+  enqueueMedia: (mediaFileId: string) => Promise<void>;
+  retryFailed: () => Promise<void>;
+  clearCompleted: () => Promise<void>;
+  updateJobProgress: (mediaFileId: string, progress: number, stage: string, filename: string) => void;
+}
+
+export const useAnalysisStore = create<AnalysisStore>((set, get) => ({
+  jobs: [],
+  activeProgress: {},
+  isLoading: false,
+  fetchQueue: async () => {
+    try {
+      const jobs = await invoke<AnalysisJob[]>("get_analysis_queue");
+      set({ jobs });
+    } catch (e) {
+      console.error("Failed to fetch analysis queue:", e);
+    }
+  },
+  enqueueMedia: async (mediaFileId: string) => {
+    try {
+      await invoke("enqueue_media_analysis", { mediaFileId });
+      await get().fetchQueue();
+    } catch (e) {
+      console.error("Failed to enqueue media analysis:", e);
+    }
+  },
+  retryFailed: async () => {
+    try {
+      await invoke("retry_failed_jobs");
+      await get().fetchQueue();
+    } catch (e) {
+      console.error("Failed to retry failed jobs:", e);
+    }
+  },
+  clearCompleted: async () => {
+    try {
+      await invoke("clear_completed_jobs");
+      await get().fetchQueue();
+    } catch (e) {
+      console.error("Failed to clear completed jobs:", e);
+    }
+  },
+  updateJobProgress: (mediaFileId, progress, stage, filename) => {
+    set((state) => ({
+      activeProgress: {
+        ...state.activeProgress,
+        [mediaFileId]: { progress, stage, filename },
+      },
+    }));
+  },
 }));
 
