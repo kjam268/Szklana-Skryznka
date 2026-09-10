@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/banner.jpg" alt="Szklana Skrzynka — Personal Broadcast Automation" width="100%" />
+  <img src="Szklana Skryznka/.github/banner.jpg" alt="Szklana Skrzynka — Personal Broadcast Automation" width="100%" />
 </p>
 
 <p align="center">
