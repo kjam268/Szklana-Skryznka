@@ -1,7 +1,10 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film } from "lucide-react";
-import { useLibraryStore, useChannelStore, useNotificationStore, MediaItemDetails } from "../store";
+import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film, Radio, Zap, Layout } from "lucide-react";
+import { useLibraryStore, useChannelStore, useNotificationStore, MediaItemDetails, useScheduleStore } from "../store";
+import { TemplatesPanel } from "../components/TemplatesPanel";
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
+
 
 export const Grid: React.FC = () => {
   interface ScheduleEntryDetails {
@@ -21,8 +24,11 @@ export const Grid: React.FC = () => {
   }
 
   const { items, fetchItems } = useLibraryStore();
-  const { channels, fetchChannels } = useChannelStore();
+  const { channels, fetchChannels, activeChannelId, setActiveChannelId } = useChannelStore();
+  const { selectedProfile, selectedPolicy } = useScheduleStore();
   const showToast = useNotificationStore((state) => state.showToast);
+  const [isFilling, setIsFilling] = useState<string | null>(null); // day ISO being filled
+
 
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -34,9 +40,11 @@ export const Grid: React.FC = () => {
   const [draggedOriginEntryId, setDraggedOriginEntryId] = useState<string | null>(null);
   const draggedMediaItemIdRef = useRef<string | null>(null);
   const draggedOriginEntryIdRef = useRef<string | null>(null);
+  const isDraggingRef = useRef<boolean>(false); // true while a library card is being dragged
   const libraryTabs = ["All", "Movie", "TV show", "Documentary", "Animation", "Shorts", "Favorites", "Kids", "Classic", "Not Found"];
 
-  const activeChannelId = channels[0]?.id || "chan_default";
+  const channelId = activeChannelId || channels[0]?.id || "chan_default";
+
 
   // Snap rolling week to start on the current week's Monday at 07:00
   const [startOfWeek, setStartOfWeek] = useState<Date>(() => {
@@ -57,7 +65,7 @@ export const Grid: React.FC = () => {
       const endOfWeek = new Date(startOfWeek.getTime() + 7 * 24 * 60 * 60 * 1000);
       const endIso = endOfWeek.toISOString();
       const data = await invoke<ScheduleEntryDetails[]>("get_schedule_entries", {
-        channelId: activeChannelId,
+        channelId,
         startTimeIso: startIso,
         endTimeIso: endIso,
       });
@@ -66,6 +74,32 @@ export const Grid: React.FC = () => {
       console.error("Failed to fetch schedule entries:", err);
     }
   };
+
+  // Auto-fill gaps for a single day
+  const handleFillGapsForDay = async (day: Date) => {
+    const dayKey = day.toISOString().slice(0, 10);
+    setIsFilling(dayKey);
+    try {
+      const dayStart = new Date(day);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(day);
+      dayEnd.setHours(23, 59, 59, 999);
+      await invoke("start_channel", {
+        channelId,
+        profileName: selectedProfile,
+        startTimeIso: dayStart.toISOString(),
+        endTimeIso: dayEnd.toISOString(),
+        policy: selectedPolicy,
+      });
+      showToast(`Gaps filled for ${day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}`, "success");
+      fetchSchedule();
+    } catch (err) {
+      showToast(`Fill failed: ${err}`, "error");
+    } finally {
+      setIsFilling(null);
+    }
+  };
+
 
   const handleDeleteEntry = async (entryId: string) => {
     try {
@@ -91,7 +125,8 @@ export const Grid: React.FC = () => {
         fetchItems();
         fetchSchedule();
       });
-  }, [fetchItems, startOfWeek, activeChannelId, fetchChannels]);
+  }, [fetchItems, startOfWeek, channelId, fetchChannels]);
+
 
   // Automatically scroll to the current time slot on mount/load
   useEffect(() => {
@@ -212,8 +247,21 @@ export const Grid: React.FC = () => {
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   };
 
+  const [showTemplates, setShowTemplates] = useState(false);
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useKeyboardShortcuts({
+    "ArrowLeft":  useCallback(() => handlePrevWeek(), [handlePrevWeek]),
+    "ArrowRight": useCallback(() => handleNextWeek(), [handleNextWeek]),
+    "t":          useCallback(() => handleResetToToday(), [handleResetToToday]),
+    "T":          useCallback(() => handleResetToToday(), [handleResetToToday]),
+    "l":          useCallback(() => setIsDrawerOpen(p => !p), []),
+    "L":          useCallback(() => setIsDrawerOpen(p => !p), []),
+  });
+
   return (
     <div className="flex-1 h-screen flex flex-row bg-background text-gray-200 font-mono overflow-hidden relative">
+
       {/* TIMELINE LIST CONTAINER */}
       <div className="flex-1 flex flex-col justify-between p-6 overflow-hidden">
         {/* Timeline Header Controls */}
@@ -229,6 +277,21 @@ export const Grid: React.FC = () => {
               </span>
             </div>
             <div className="flex items-center space-x-3">
+              {/* Channel Switcher for Grid */}
+              {channels.length > 1 && (
+                <div className="flex items-center space-x-1 bg-gray-900 border border-gray-800 rounded px-2 py-1">
+                  <Radio size={11} className="text-accent" />
+                  <select
+                    value={channelId}
+                    onChange={e => setActiveChannelId(e.target.value)}
+                    className="bg-transparent text-[10px] font-bold text-gray-300 focus:outline-none cursor-pointer"
+                  >
+                    {channels.map(ch => (
+                      <option key={ch.id} value={ch.id}>{ch.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="flex items-center space-x-3 bg-gray-950 p-1 border border-gray-900 rounded-lg">
                 <button
                   onClick={handlePrevWeek}
@@ -254,6 +317,17 @@ export const Grid: React.FC = () => {
                   <ChevronRight size={16} />
                 </button>
               </div>
+              <button
+                onClick={() => setShowTemplates(prev => !prev)}
+                className={`text-xs px-3.5 py-1.5 font-bold rounded-lg transition-all flex items-center space-x-1.5 border ${
+                  showTemplates
+                    ? "bg-accent/15 text-accent border-accent/30 shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+                    : "bg-panel border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600"
+                }`}
+              >
+                <Layout size={14} />
+                <span>TEMPLATES</span>
+              </button>
               <button
                 onClick={() => setIsDrawerOpen(prev => !prev)}
                 className={`text-xs px-3.5 py-1.5 font-bold rounded-lg transition-all flex items-center space-x-1.5 border ${
@@ -330,13 +404,36 @@ export const Grid: React.FC = () => {
             className="flex-1 overflow-auto scrollbar-thin"
           >
             <div className="min-w-[1250px] flex flex-col">
-              {/* Header row */}
+              {/* Header row — day columns with gap-fill button */}
               <div className="flex border-b border-gray-800 bg-gray-900/90 sticky top-0 z-30">
-                {weekDays.map((day, idx) => (
-                  <div key={idx} className="flex-1 p-3 text-center border-r border-gray-800 text-xs font-bold text-accent select-none">
-                    {day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
-                  </div>
-                ))}
+                {weekDays.map((day, idx) => {
+                  // Count entries for this calendar day to detect gaps
+                  const dayStr = day.toISOString().slice(0, 10);
+                  const dayEntries = scheduleEntries.filter(e => e.start_time.slice(0, 10) === dayStr);
+                  const hasGaps = dayEntries.length === 0;
+                  const isFillingDay = isFilling === dayStr;
+                  return (
+                    <div key={idx} className="flex-1 p-2 text-center border-r border-gray-800 text-xs font-bold select-none">
+                      <div className={`${hasGaps ? "text-rose-400" : "text-accent"} leading-tight`}>
+                        {day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
+                      </div>
+                      {hasGaps && (
+                        <button
+                          onClick={() => handleFillGapsForDay(day)}
+                          disabled={!!isFilling}
+                          className="mt-0.5 flex items-center justify-center space-x-0.5 mx-auto text-[8px] font-bold text-rose-400 hover:text-accent hover:bg-accent/10 border border-rose-800/50 hover:border-accent/30 px-1.5 py-0.5 rounded transition-all disabled:opacity-50"
+                          title="Auto-fill empty day"
+                        >
+                          {isFillingDay ? (
+                            <span className="animate-pulse">FILLING...</span>
+                          ) : (
+                            <><Zap size={8} /><span>FILL GAPS</span></>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
 
               {/* Grid slots cells */}
@@ -729,13 +826,17 @@ export const Grid: React.FC = () => {
         </div>
       </div>
 
-      {/* RIGHT EDGE HOVER HOT-ZONE (Reopens library drawer on edge hover or drag) */}
+      {/* RIGHT EDGE HOVER HOT-ZONE (Reopens library drawer on edge hover, but NOT during an active drag) */}
       {!isDrawerOpen && (
         <div 
           onMouseEnter={() => setIsDrawerOpen(true)}
           onDragOver={(e) => {
             e.preventDefault();
-            setIsDrawerOpen(true);
+            // Only re-open the drawer when hovering with an external drag (not from library cards)
+            // isDraggingRef is set true on library card dragStart and cleared on dragEnd
+            if (!isDraggingRef.current) {
+              setIsDrawerOpen(true);
+            }
           }}
           className="absolute right-0 top-0 bottom-0 w-4 hover:w-8 z-30 cursor-pointer flex items-center justify-end group transition-all duration-150"
           title="Hover right edge to open Library drawer"
@@ -854,6 +955,7 @@ export const Grid: React.FC = () => {
                               draggable={true}
                               style={{ WebkitUserDrag: "element" } as React.CSSProperties}
                               onDragStart={(e) => {
+                                isDraggingRef.current = true;
                                 draggedMediaItemIdRef.current = details.item.id;
                                 setDraggedItemId(details.item.id);
                                 e.dataTransfer.setData("text/plain", details.item.id);
@@ -863,6 +965,7 @@ export const Grid: React.FC = () => {
                                 }, 100);
                               }}
                               onDragEnd={() => {
+                                isDraggingRef.current = false;
                                 draggedMediaItemIdRef.current = null;
                                 draggedOriginEntryIdRef.current = null;
                                 setDraggedItemId(null);
@@ -988,6 +1091,7 @@ export const Grid: React.FC = () => {
                       draggable={true}
                       style={{ WebkitUserDrag: "element" } as React.CSSProperties}
                       onDragStart={(e) => {
+                        isDraggingRef.current = true;
                         draggedMediaItemIdRef.current = details.item.id;
                         setDraggedItemId(details.item.id);
                         e.dataTransfer.setData("text/plain", details.item.id);
@@ -997,6 +1101,7 @@ export const Grid: React.FC = () => {
                         }, 100);
                       }}
                       onDragEnd={() => {
+                        isDraggingRef.current = false;
                         draggedMediaItemIdRef.current = null;
                         draggedOriginEntryIdRef.current = null;
                         setDraggedItemId(null);
@@ -1026,6 +1131,17 @@ export const Grid: React.FC = () => {
           </div>
         </div>
       </div>
+      {/* TEMPLATES SIDE PANEL */}
+      {showTemplates && (
+        <TemplatesPanel
+          channelId={channelId}
+          selectedDayIso={startOfWeek.toISOString()}
+          onApplied={() => {
+            const endIso = new Date(startOfWeek.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+            useScheduleStore.getState().fetchEntries(channelId, startOfWeek.toISOString(), endIso);
+          }}
+        />
+      )}
     </div>
   );
 };

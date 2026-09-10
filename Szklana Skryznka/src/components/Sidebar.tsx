@@ -2,8 +2,9 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { 
   Tv, Film, CalendarDays, Database, BarChart3, Lightbulb, 
-  ChevronLeft, Settings
+  ChevronLeft, Settings, Bookmark
 } from "lucide-react";
+
 import { useLibraryStore, useScheduleStore, useChannelStore } from "../store";
 
 interface SidebarProps {
@@ -121,7 +122,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: "database", label: "Database Viewer", icon: Database },
     { id: "health", label: "Statistics", icon: BarChart3 },
     { id: "suggestions", label: "Smart Suggestions", icon: Lightbulb },
+    { id: "watchlist", label: "Watchlist", icon: Bookmark },
+    { id: "settings", label: "Settings", icon: Settings },
   ];
+
 
   const fetchWatchedPaths = async () => {
     try {

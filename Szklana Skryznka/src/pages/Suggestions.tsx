@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { Lightbulb, RotateCw, Star, Film, CheckCircle, Database } from "lucide-react";
+import { Lightbulb, RotateCw, Star, Film, CheckCircle, Database, Bookmark, BookmarkCheck } from "lucide-react";
+import { useWatchlistStore } from "../store";
 
 interface RecommendedItem {
   id: string;
@@ -11,18 +12,21 @@ interface RecommendedItem {
   rating: number;
   poster_path?: string;
   sourceEngine: string;
+  affinityHit: boolean;
 }
 
 export const Suggestions: React.FC = () => {
   const [suggestions, setSuggestions] = useState<RecommendedItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [minRating, setMinRating] = useState(7.5);
+  const { items: watchlistItems, fetchWatchlist, addItem, isInWatchlist } = useWatchlistStore();
+  const [addingId, setAddingId] = useState<string | null>(null);
 
   const fetchSuggestions = async () => {
     setIsLoading(true);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const res = await invoke<RecommendedItem[]>("get_smart_suggestions");
+      const res = await invoke<RecommendedItem[]>("get_smart_suggestions", { minRating });
       setSuggestions(res);
     } catch (e) {
       console.error("Failed to load suggestions:", e);
@@ -33,42 +37,63 @@ export const Suggestions: React.FC = () => {
 
   useEffect(() => {
     fetchSuggestions();
-  }, []);
+    fetchWatchlist();
+  }, [fetchWatchlist]);
 
   const handleAddToWatchlist = async (item: RecommendedItem) => {
+    if (isInWatchlist(item.id)) return;
+    setAddingId(item.id);
     try {
-      // Add a watchlist entry
-      // Wait, we can insert into the SQLite watchlist table or add program items
-      // Let's create an item on watchlist or trigger mock alert
-      setWatchlist((prev) => [...prev, item.id]);
-      alert(`"${item.title}" successfully added to your station watchlist!`);
+      await addItem({
+        id: item.id,
+        title: item.title,
+        year: item.year,
+        director: item.director,
+        synopsis: item.synopsis,
+        rating: item.rating,
+        poster_path: item.poster_path,
+      });
     } catch (e) {
-      alert(`Failed to add watchlist item: ${e}`);
+      console.error(`Failed to add watchlist item: ${e}`);
+    } finally {
+      setAddingId(null);
     }
   };
 
   return (
     <div className="flex-1 h-screen flex flex-col justify-between p-6 bg-background text-gray-200 font-mono overflow-hidden">
       {/* HEADER CONTROLS */}
-      <div className="space-y-4">
-        <div className="flex justify-between items-center border-b border-gray-800 pb-3">
+      <div className="space-y-4 shrink-0">
+        <div className="flex items-center justify-between border-b border-gray-800 pb-3">
           <span className="text-sm font-bold tracking-widest text-accent flex items-center space-x-2">
             <Lightbulb size={16} />
             <span>WORLDWIDE TOP MOVIE SUGGESTIONS</span>
           </span>
-
-          <button
-            onClick={fetchSuggestions}
-            disabled={isLoading}
-            className="bg-accent text-background font-bold text-xs rounded px-4 py-1.5 hover:bg-cyan-400 flex items-center space-x-1.5 transition-colors"
-          >
-            <RotateCw size={12} className={isLoading ? "animate-spin" : ""} />
-            <span>{isLoading ? "LOADING..." : "REFRESH 10 RANDOM"}</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent("switch-tab", { detail: "watchlist" }))}
+              className="flex items-center space-x-1.5 bg-gray-800 border border-gray-700 text-gray-300 hover:text-accent hover:border-accent/40 font-bold text-xs rounded px-3 py-1.5 transition-colors"
+            >
+              <Bookmark size={12} />
+              <span>WATCHLIST ({watchlistItems.length})</span>
+            </button>
+            <button onClick={fetchSuggestions} disabled={isLoading}
+              className="bg-accent text-background font-bold text-xs rounded px-4 py-1.5 hover:bg-cyan-400 flex items-center space-x-1.5 transition-colors">
+              <RotateCw size={12} className={isLoading ? "animate-spin" : ""} />
+              <span>{isLoading ? "LOADING..." : "REFRESH"}</span>
+            </button>
+          </div>
         </div>
-        
-        <p className="text-[10px] text-gray-500">
-          This algorithmic engine pulls 10 random titles from our SQLite database of the top 100,000 worldwide movies that are NOT present in your library. No AI involved.
+        <div className="flex items-center space-x-3 mt-3">
+          <span className="text-[10px] text-gray-500 font-bold w-28 shrink-0">MIN RATING:</span>
+          <input type="range" min={7.5} max={10} step={0.1} value={minRating}
+            onChange={e => setMinRating(parseFloat(e.target.value))}
+            onMouseUp={fetchSuggestions}
+            className="flex-1 accent-cyan-400 h-1" />
+          <span className="text-[10px] font-bold text-accent w-8 text-right">{minRating.toFixed(1)}</span>
+        </div>
+        <p className="text-[10px] text-gray-500 mt-1">
+          Genre affinity engine — weights results by your most-played genres, filtered at rating ≥ {minRating.toFixed(1)}.
         </p>
       </div>
 
@@ -84,7 +109,8 @@ export const Suggestions: React.FC = () => {
           </div>
         ) : (
           suggestions.map((item) => {
-            const isAdded = watchlist.includes(item.id);
+            const inWatchlist = isInWatchlist(item.id);
+            const isAdding = addingId === item.id;
 
             return (
               <div 
@@ -106,6 +132,11 @@ export const Suggestions: React.FC = () => {
                       <span className="text-[8px] text-gray-600 font-bold mt-1">NO ART</span>
                     </div>
                   )}
+                  {inWatchlist && (
+                    <div className="absolute top-1 right-1 bg-accent/90 rounded-full p-0.5">
+                      <BookmarkCheck size={10} className="text-background" />
+                    </div>
+                  )}
                 </div>
 
                 {/* Suggestions Info */}
@@ -113,9 +144,14 @@ export const Suggestions: React.FC = () => {
                   <div className="space-y-1">
                     <div className="flex justify-between items-start">
                       <span className="text-sm font-bold text-gray-200 hover:text-accent cursor-pointer">{item.title}</span>
-                      <div className="flex items-center space-x-1.5 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded text-[10px]">
-                        <Star size={10} className="text-amber-500 fill-amber-500" />
-                        <span className="text-gray-300 font-bold">{item.rating.toFixed(1)}</span>
+                      <div className="flex items-center space-x-1.5">
+                        {item.affinityHit && (
+                          <span className="text-[8px] font-bold bg-accent/15 border border-accent/30 text-accent px-1.5 py-0.5 rounded uppercase tracking-wide">★ Affinity</span>
+                        )}
+                        <div className="flex items-center space-x-1 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded text-[10px]">
+                          <Star size={10} className="text-amber-500 fill-amber-500" />
+                          <span className="text-gray-300 font-bold">{item.rating.toFixed(1)}</span>
+                        </div>
                       </div>
                     </div>
                     <div className="text-[10px] text-gray-500 font-bold flex space-x-3">
@@ -123,7 +159,7 @@ export const Suggestions: React.FC = () => {
                       <span>DIRECTOR: {item.director}</span>
                     </div>
                     <div className="text-[9px] text-gray-500 truncate font-sans">
-                      CAST: {item.cast.join(", ")}
+                      CAST: {Array.isArray(item.cast) ? item.cast.join(", ") : item.cast}
                     </div>
                     <p className="text-[11px] text-gray-400 font-sans leading-relaxed line-clamp-2 mt-2">
                       {item.synopsis}
@@ -134,19 +170,21 @@ export const Suggestions: React.FC = () => {
                   <div className="flex space-x-3 pt-2 border-t border-gray-950 text-[10px]">
                     <button
                       onClick={() => handleAddToWatchlist(item)}
-                      disabled={isAdded}
+                      disabled={inWatchlist || isAdding}
                       className={`flex items-center space-x-1 px-3 py-1 rounded transition-colors ${
-                        isAdded 
+                        inWatchlist 
                           ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-500" 
+                          : isAdding
+                          ? "bg-accent/10 border border-accent/20 text-accent opacity-60"
                           : "bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200 hover:bg-gray-700"
                       }`}
                     >
-                      <CheckCircle size={12} className={isAdded ? "text-emerald-500" : "text-gray-500"} />
-                      <span>{isAdded ? "ADDED TO WATCHLIST" : "ADD TO WATCHLIST"}</span>
+                      <CheckCircle size={12} className={inWatchlist ? "text-emerald-500" : "text-gray-500"} />
+                      <span>{inWatchlist ? "IN WATCHLIST" : isAdding ? "SAVING..." : "ADD TO WATCHLIST"}</span>
                     </button>
                     <span className="text-[9px] text-gray-600 self-center flex items-center space-x-1">
                       <Database size={10} />
-                      <span>INDEX: {item.id}</span>
+                      <span>ID: {item.id}</span>
                     </span>
                   </div>
                 </div>
@@ -157,9 +195,9 @@ export const Suggestions: React.FC = () => {
       </div>
 
       {/* FOOTER */}
-      <div className="mt-4 pt-4 border-t border-gray-800 text-[10px] text-gray-500 flex justify-between select-none">
-        <span>ENGINE TYPE: RANDOM WORLDWIDE DATABASE RESOLVER</span>
-        <span className="text-accent">SEED VOLUME: 100,000 MOVIE RECORDS</span>
+      <div className="mt-4 pt-4 border-t border-gray-800 text-[10px] text-gray-500 flex justify-between select-none shrink-0">
+        <span>ENGINE: {suggestions.some(s => s.affinityHit) ? "GENRE AFFINITY RESOLVER" : "CURATED DISCOVERY"}</span>
+        <span className="text-accent">WATCHLIST: {watchlistItems.length} ITEMS · MIN RATING: {minRating.toFixed(1)}</span>
       </div>
     </div>
   );

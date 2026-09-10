@@ -13,6 +13,7 @@ interface HlsStatus {
   is_streaming: boolean;
   current_file: string | null;
   hls_url: string;
+  playout_start_sec: number;
 }
 
 function parseSrtToCues(srtText: string): SubtitleCue[] {
@@ -45,11 +46,16 @@ function parseSrtToCues(srtText: string): SubtitleCue[] {
 
 
 export const TvClient: React.FC = () => {
-  const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
+  const { playoutState, fetchPlayoutState, channels, fetchChannels, activeChannelId } = useChannelStore();
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hlsSrc, setHlsSrc] = useState<string>("");
   const hlsSrcRef = useRef<string>("");
   useEffect(() => { hlsSrcRef.current = hlsSrc; }, [hlsSrc]);
+  // Track which file is currently playing to avoid redundant src resets
+  const hlsFileRef = useRef<string | null>(null);
+  // Store the playout_start_sec from ffmpeg so we can sync position on connect
+  const hlsPlayoutStartRef = useRef<number>(0);
 
   // Subtitles & Audio Track state
   const [subtitles, setSubtitles] = useState<SubtitleRecordInfo[]>([]);
@@ -88,7 +94,69 @@ export const TvClient: React.FC = () => {
        activeEntry.file_path.toLowerCase().endsWith(".flac"))
     : false;
 
+  // ── Play Count: 60-second confirmed-viewing threshold (mirrors OnAir.tsx) ───
+  const tvPlayCountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tvLastRecordedEntryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (tvPlayCountTimerRef.current) {
+      clearTimeout(tvPlayCountTimerRef.current);
+      tvPlayCountTimerRef.current = null;
+    }
+
+    const entryId = activeEntry?.media_item_id;
+    if (!entryId) return;
+    // Avoid double-counting the same session
+    if (tvLastRecordedEntryRef.current === entryId) return;
+
+    const entryStartMs = activeEntry?.start_time
+      ? new Date(activeEntry.start_time).getTime()
+      : Date.now();
+
+    tvPlayCountTimerRef.current = setTimeout(() => {
+      const elapsed = Math.round((Date.now() - entryStartMs) / 1000);
+      invoke("record_movie_played", {
+        mediaItemId: entryId,
+        channelId: activeChannelId || channels[0]?.id || "chan_default",
+        durationAired: Math.max(elapsed, 60),
+      }).catch(err => console.warn("TV: Failed to record play count:", err));
+      tvLastRecordedEntryRef.current = entryId;
+    }, 60_000);
+
+    return () => {
+      if (tvPlayCountTimerRef.current) {
+        clearTimeout(tvPlayCountTimerRef.current);
+        tvPlayCountTimerRef.current = null;
+      }
+    };
+  }, [activeEntry?.media_item_id, activeChannelId, channels]);
+  // ──────────────────────────────────────────────────────
+
   const isWebCompatible = isAudioOnly;
+
+  const getPosterUrl = (path?: string) => {
+    if (!path) return "";
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      return path;
+    }
+    return convertFileSrc(path);
+  };
+
+  const getFallbackPosterUrl = (itemId: string) => {
+    let hash = 0;
+    for (let i = 0; i < itemId.length; i++) {
+      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const index = Math.abs(hash) % 37;
+    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
+  };
+
+  const formatDuration = (seconds?: number) => {
+    if (!seconds || seconds <= 0) return "";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
 
   // Helper: build human-readable label for an audio stream
   const buildAudioLabel = (track: AudioStreamInfo): string => {
@@ -174,8 +242,9 @@ export const TvClient: React.FC = () => {
 
     const trackIndex = (sub as SubtitleRecordInfo).track_index;
     invoke<string>("read_subtitle_content", {
-      filePath: sub.file_path || "",
-      trackIndex: trackIndex ?? null,
+      filePath: sub.file_path || activeEntry?.file_path || null,
+      subtitleId: sub.id,
+      trackIndex: trackIndex !== undefined ? trackIndex : null,
     })
       .then(text => {
         const cues = parseSrtToCues(text);
@@ -189,9 +258,9 @@ export const TvClient: React.FC = () => {
         setCurrentCues([]);
         setVttTrackUrl("");
       });
-  }, [selectedSubtitleId, subtitles]);
+  }, [selectedSubtitleId, subtitles, activeEntry?.file_path]);
 
-  // Update active subtitle cue text on video timeupdate
+  // Update active subtitle cue text on playback tick with high frequency
   useEffect(() => {
     if (currentCues.length === 0) {
       setActiveCueText("");
@@ -199,53 +268,93 @@ export const TvClient: React.FC = () => {
     }
 
     const updateCue = () => {
-      const currentSec = videoRef.current
-        ? videoRef.current.currentTime
-        : (playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0);
+      let currentSec = 0;
+      if (videoRef.current && !videoRef.current.paused) {
+        currentSec = videoRef.current.currentTime;
+      } else if (tvHlsVideoRef.current && !tvHlsVideoRef.current.paused) {
+        currentSec = hlsPlayoutStartRef.current + tvHlsVideoRef.current.currentTime;
+      } else if (activeEntry?.start_time) {
+        const startMs = new Date(activeEntry.start_time).getTime();
+        const nowMs = Date.now();
+        currentSec = Math.max(0, (nowMs - startMs) / 1000);
+      } else if (playoutState?.playout_position_ms) {
+        currentSec = playoutState.playout_position_ms / 1000;
+      }
+
       const match = currentCues.find(c => currentSec >= c.start && currentSec <= c.end);
       setActiveCueText(match ? match.text : "");
     };
 
-    const interval = setInterval(updateCue, 500);
+    const interval = setInterval(updateCue, 200);
     return () => clearInterval(interval);
-  }, [currentCues, playoutState?.playout_position_ms]);
+  }, [currentCues, activeEntry?.start_time, playoutState?.playout_position_ms]);
 
-  // Poll get_hls_status — pick up stream started by OnAir Monitor without restarting transcoder
+  // Poll get_hls_status — pick up stream started by OnAir Monitor.
+  // If no stream is running but we have an active EPG entry, auto-start the transcoder
+  // so TvClient works independently without requiring OnAir to be open.
+  const autoStartFileRef = useRef<string | null>(null);
   useEffect(() => {
-    let lastStreamFile: string | null = null;
-
     const poll = async () => {
       try {
         const status = await invoke<HlsStatus>("get_hls_status");
-        if (status.is_streaming) {
-          // Only update hlsSrc when the file changes or src is empty (avoid constant reloads)
-          if (status.current_file !== lastStreamFile || !hlsSrcRef.current) {
-            lastStreamFile = status.current_file;
-            setHlsSrc(`${status.hls_url}?t=${Date.now()}`);
+        if (status.is_streaming && status.current_file) {
+          // Stream already running (by OnAir or a previous auto-start) — just attach
+          if (status.current_file !== hlsFileRef.current) {
+            hlsFileRef.current = status.current_file;
+            hlsPlayoutStartRef.current = status.playout_start_sec;
+            setHlsSrc(status.hls_url);
           }
         } else {
-          lastStreamFile = null;
-          setHlsSrc("");
+          // No stream running — auto-start if we have an active non-audio file
+          const filePath = playoutState?.active_entry?.file_path;
+          const posMs = playoutState?.playout_position_ms ?? 0;
+          if (filePath && filePath !== autoStartFileRef.current && !isAudioOnly) {
+            autoStartFileRef.current = filePath;
+            hlsFileRef.current = null; // will be set after transcode starts
+            try {
+              await invoke<string>("start_transcode", {
+                filePath,
+                startTimeSec: posMs / 1000,
+                audioTrackIndex: null,
+              });
+              // Fetch updated status to get the real hls_url
+              const newStatus = await invoke<HlsStatus>("get_hls_status");
+              hlsFileRef.current = newStatus.current_file;
+              hlsPlayoutStartRef.current = newStatus.playout_start_sec;
+              setHlsSrc(`${newStatus.hls_url}?t=${Date.now()}`);
+            } catch (err) {
+              console.error("TvClient auto-start transcode failed:", err);
+              autoStartFileRef.current = null;
+            }
+          } else if (!filePath) {
+            // Nothing scheduled — clear
+            if (hlsFileRef.current !== null) {
+              hlsFileRef.current = null;
+              autoStartFileRef.current = null;
+              setHlsSrc("");
+            }
+          }
         }
       } catch {
-        setHlsSrc("");
+        // Silently ignore — stream may just be starting
       }
     };
 
     poll();
-    const id = setInterval(poll, 3000);
+    const id = setInterval(poll, 5000);
     return () => clearInterval(id);
-  }, []);
+  }, [playoutState?.active_entry?.file_path, playoutState?.playout_position_ms, isAudioOnly]);
 
-  // Native WebKit HLS Playout Effect for TV Client
+  // HLS playout effect: on src change, ensure video plays immediately
   const tvHlsVideoRef = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     if (!hlsSrc || isWebCompatible) return;
-    const targetVideo = tvHlsVideoRef.current;
-    if (!targetVideo) return;
-    if (targetVideo.readyState >= 2) {
-      targetVideo.play().catch(err => console.warn("Native HLS play call error:", err));
-    }
+    const video = tvHlsVideoRef.current;
+    if (!video) return;
+    // The video element already has autoPlay, but we also call play() here in case
+    // the browser deferred it. No seek needed — HLS live naturally seeks to the live edge,
+    // which is the same content frame OnAir Monitor is showing.
+    video.play().catch(err => console.warn("TV Client HLS play error:", err));
   }, [hlsSrc, isWebCompatible]);
 
   // Synchronize playout offset for direct playout files
@@ -318,11 +427,19 @@ export const TvClient: React.FC = () => {
               autoPlay
               muted={false}
               loop={false}
-              controls
               playsInline
               crossOrigin="anonymous"
               onCanPlay={(e) => {
-                (e.target as HTMLVideoElement).play().catch((err) => console.warn("TV Client HLS play onCanPlay error:", err));
+                const v = e.target as HTMLVideoElement;
+                // Seek to live edge: seekable.end(0) gives the most recently transcoded position.
+                // This ensures TvClient is in sync with OnAir which is also at the live edge.
+                if (v.seekable.length > 0) {
+                  v.currentTime = v.seekable.end(0);
+                }
+                v.play().catch(err => console.warn("TV Client HLS canplay error:", err));
+              }}
+              onError={(e) => {
+                console.warn("TV Client HLS video error:", (e.target as HTMLVideoElement).error);
               }}
             />
           ) : (
@@ -337,9 +454,11 @@ export const TvClient: React.FC = () => {
             </div>
           )}
 
-          {/* ON-SCREEN SUBTITLE OVERLAY */}
+          {/* ON-SCREEN SUBTITLE OVERLAY (Adjusts height dynamically when info overlay is hovered) */}
           {activeCueText && (
-            <div className="absolute bottom-12 left-1/2 -translate-x-1/2 bg-black/90 text-yellow-300 font-sans font-extrabold text-lg px-6 py-2 rounded-lg border border-yellow-500/40 shadow-2xl backdrop-blur-md pointer-events-none z-20 max-w-[85%] text-center leading-relaxed">
+            <div className={`absolute left-1/2 -translate-x-1/2 bg-black/90 text-yellow-300 font-sans font-extrabold text-lg px-6 py-2 rounded-lg border border-yellow-500/40 shadow-2xl backdrop-blur-md pointer-events-none z-30 max-w-[85%] text-center leading-relaxed transition-all duration-300 ${
+              showControls && activeEntry ? "bottom-44" : "bottom-12"
+            }`}>
               {activeCueText}
             </div>
           )}
@@ -426,6 +545,85 @@ export const TvClient: React.FC = () => {
               )}
             </div>
           </div>
+
+          {/* CINEMATIC HOVER INFO OVERLAY (bottom-left, shown on mouse hover) */}
+          {activeEntry && (
+            <div
+              className={`absolute bottom-0 left-0 right-0 z-20 pointer-events-none transition-all duration-500 ${
+                showControls ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
+              }`}
+            >
+              {/* Gradient fade from black at bottom */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/70 to-transparent" />
+              <div className="relative z-10 flex items-end gap-5 px-8 pb-8 pt-24">
+                {/* Poster thumbnail with convertFileSrc and fallback */}
+                <div className="w-20 h-28 rounded-lg overflow-hidden shadow-2xl border border-white/10 shrink-0 hidden sm:flex items-center justify-center bg-zinc-950">
+                  <img
+                    src={activeEntry.poster_path ? getPosterUrl(activeEntry.poster_path) : getFallbackPosterUrl(activeEntry.media_item_id || activeEntry.id)}
+                    alt={activeEntry.item_title}
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).src = getFallbackPosterUrl(activeEntry.media_item_id || activeEntry.id);
+                    }}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  {/* Title + year */}
+                  <div className="flex items-baseline gap-3 flex-wrap">
+                    <h2 className="text-white font-extrabold text-2xl leading-tight tracking-tight drop-shadow-lg">
+                      {activeEntry.item_title}
+                    </h2>
+                    {activeEntry.year && (
+                      <span className="text-gray-400 text-sm font-mono shrink-0">{activeEntry.year}</span>
+                    )}
+                  </div>
+                  {/* Director */}
+                  {activeEntry.director && (
+                    <div className="text-cyan-400 text-xs font-semibold tracking-wide">
+                      Dir. {activeEntry.director}
+                    </div>
+                  )}
+                  {/* Synopsis */}
+                  {activeEntry.synopsis && activeEntry.synopsis !== "Scanned local content" && (
+                    <p className="text-gray-300 text-xs leading-relaxed line-clamp-3 max-w-2xl">
+                      {activeEntry.synopsis}
+                    </p>
+                  )}
+                  {/* Badges row */}
+                  <div className="flex items-center gap-2 pt-0.5 flex-wrap">
+                    <span className="text-[9px] font-bold tracking-widest uppercase px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                      {activeEntry.media_type}
+                    </span>
+                    {activeEntry.duration > 0 && (
+                      <span className="text-[9px] font-mono text-gray-500">
+                        {formatDuration(activeEntry.duration)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      ) : hlsSrc ? (
+        // HLS stream is running but no active_entry yet (EPG polling lag) — show the stream
+        <div className="w-full h-full relative">
+          <video
+            ref={tvHlsVideoRef}
+            src={hlsSrc}
+            className="w-full h-full object-contain"
+            autoPlay
+            muted={false}
+            loop={false}
+            playsInline
+            crossOrigin="anonymous"
+            onCanPlay={(e) => {
+              const v = e.target as HTMLVideoElement;
+              if (v.seekable.length > 0) v.currentTime = v.seekable.end(0);
+              v.play().catch(err => console.warn("TV Client HLS fallback canplay error:", err));
+            }}
+          />
         </div>
       ) : (
         // Station Standby - Color Bars

@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLibraryStore, MediaItemDetails, useNotificationStore, useAnalysisStore } from "../store";
-import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown } from "lucide-react";
+import { Search, Film, Star, CheckCircle, XCircle, Upload, Trash2, FolderOpen, RefreshCw, Crown, ArrowUp, ArrowDown, SlidersHorizontal, CheckSquare, Square, Zap, X, ChevronDown, ChevronUp } from "lucide-react";
+import { useKeyboardShortcut } from "../hooks/useKeyboardShortcuts";
 
 export const Library: React.FC = () => {
   const { 
@@ -67,6 +68,111 @@ export const Library: React.FC = () => {
   const [isSearchingOs, setIsSearchingOs] = useState(false);
   const [downloadingOsId, setDownloadingOsId] = useState<number | null>(null);
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+
+  // ── Bulk selection state ──────────────────────────────────────────────────
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkProgress, setBulkProgress] = useState<{done: number; total: number; label: string} | null>(null);
+
+  // ── Advanced filter panel state ───────────────────────────────────────────
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterGenres, setFilterGenres] = useState<Set<string>>(new Set());
+  const [filterMinYear, setFilterMinYear] = useState<number>(0);
+  const [filterMaxYear, setFilterMaxYear] = useState<number>(0);
+  const [filterResolutions, setFilterResolutions] = useState<Set<string>>(new Set());
+  const [filterCodecs, setFilterCodecs] = useState<Set<string>>(new Set());
+  const [filterMinQuality, setFilterMinQuality] = useState(0);
+  const [filterHasSubs, setFilterHasSubs] = useState(false);
+  const [filterHasPoster, setFilterHasPoster] = useState(false);
+
+  // ── Derived: all genres present in library ────────────────────────────────
+  const allGenres = useMemo(() => {
+    const s = new Set<string>();
+    items.forEach(d => d.genres?.forEach(g => s.add(g)));
+    return [...s].sort();
+  }, [items]);
+
+  // ── Derived: year range ───────────────────────────────────────────────────
+  const [libMinYear, libMaxYear] = useMemo(() => {
+    const years = items.map(d => d.item.year).filter(Boolean) as number[];
+    if (years.length === 0) return [1900, new Date().getFullYear()];
+    return [Math.min(...years), Math.max(...years)];
+  }, [items]);
+
+  // Init year filter range once items load
+  useEffect(() => {
+    if (items.length > 0 && filterMinYear === 0) {
+      setFilterMinYear(libMinYear);
+      setFilterMaxYear(libMaxYear);
+    }
+  }, [libMinYear, libMaxYear, items.length]);
+
+  // Count active filters for badge
+  const activeFilterCount = [
+    filterGenres.size > 0,
+    filterResolutions.size > 0,
+    filterCodecs.size > 0,
+    filterMinQuality > 0,
+    filterHasSubs,
+    filterHasPoster,
+    filterMinYear > libMinYear || filterMaxYear < libMaxYear,
+  ].filter(Boolean).length;
+
+  const clearFilters = useCallback(() => {
+    setFilterGenres(new Set());
+    setFilterResolutions(new Set());
+    setFilterCodecs(new Set());
+    setFilterMinQuality(0);
+    setFilterHasSubs(false);
+    setFilterHasPoster(false);
+    setFilterMinYear(libMinYear);
+    setFilterMaxYear(libMaxYear);
+  }, [libMinYear, libMaxYear]);
+
+  // Esc shortcut: clear search & filters
+  useKeyboardShortcut("Escape", useCallback(() => {
+    setSearchQuery("");
+    clearFilters();
+  }, [setSearchQuery, clearFilters]));
+
+  // ── Bulk action handler ───────────────────────────────────────────────────
+  const handleBulkAction = useCallback(async (action: "rescan" | "quality" | "remove") => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    setBulkProgress({ done: 0, total: ids.length, label: action === "rescan" ? "RE-SCANNING" : action === "quality" ? "QUALITY SCORING" : "REMOVING" });
+    let done = 0;
+    for (const id of ids) {
+      try {
+        if (action === "rescan") {
+          await invoke("refresh_item_metadata", { itemId: id, searchOverride: null });
+        } else if (action === "quality") {
+          const details = items.find(d => d.item.id === id);
+          const fileId = details?.files?.[0]?.id;
+          if (fileId) await invoke("enqueue_media_analysis", { mediaFileId: fileId });
+        } else if (action === "remove") {
+          await deleteItem(id);
+        }
+      } catch (e) {
+        console.error(`Bulk ${action} failed for ${id}:`, e);
+      }
+      done++;
+      setBulkProgress(p => p ? { ...p, done } : null);
+    }
+    setBulkProgress(null);
+    setSelectedIds(new Set());
+    setIsSelecting(false);
+    if (action !== "remove") fetchItems(true);
+    showToast(`Bulk ${action}: ${done}/${ids.length} items processed`, "success");
+  }, [selectedIds, items, deleteItem, fetchItems, showToast]);
+
+  const toggleSelect = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Subtitle import fields
   const [subLang, setSubLang] = useState("en");
@@ -373,23 +479,58 @@ export const Library: React.FC = () => {
     return 1;
   };
 
-  // Filter items based on search query and tag filter (represented by selectedTab)
+  // Filter items based on search query, tab filter, AND advanced filter panel
   const filteredItems = items.filter((details) => {
     const titleMatch = details.item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                        (details.item.original_title && details.item.original_title.toLowerCase().includes(searchQuery.toLowerCase()));
-    
+
     let tagMatch = false;
     if (selectedTab === "All") {
       tagMatch = true;
     } else if (selectedTab === "Not Found") {
-      // Videos for which neither AniList nor TMDb returned a match or positive result
       const poster = details.item.poster_path;
       const hasPoster = poster && (poster.startsWith("http://") || poster.startsWith("https://"));
       tagMatch = !hasPoster;
     } else {
       tagMatch = details.tags.includes(selectedTab);
     }
-    
+
+    // Advanced filters
+    if (filterGenres.size > 0) {
+      const itemGenres = new Set(details.genres || []);
+      const hasMatch = [...filterGenres].some(g => itemGenres.has(g));
+      if (!hasMatch) return false;
+    }
+    if (filterMinYear > 0 && filterMaxYear > 0) {
+      const y = details.item.year || 0;
+      if (y < filterMinYear || y > filterMaxYear) return false;
+    }
+    if (filterResolutions.size > 0) {
+      const res = details.files?.[0]?.resolution || "";
+      const normalized = res.includes("2160") || res.includes("4K") ? "4K"
+        : res.includes("1080") ? "1080p"
+        : res.includes("720") ? "720p" : "SD";
+      if (!filterResolutions.has(normalized)) return false;
+    }
+    if (filterCodecs.size > 0) {
+      const codec = (details.files?.[0]?.video_codec || "").toLowerCase();
+      const normalized = codec.includes("hevc") || codec.includes("h265") ? "H.265"
+        : codec.includes("avc") || codec.includes("h264") ? "H.264"
+        : codec.includes("av1") ? "AV1"
+        : codec.includes("vp9") ? "VP9" : "Other";
+      if (!filterCodecs.has(normalized)) return false;
+    }
+    if (filterMinQuality > 0) {
+      const q = details.files?.[0]?.quality_score || 0;
+      if (q < filterMinQuality) return false;
+    }
+    if (filterHasSubs && !(details.subtitles && details.subtitles.length > 0)) return false;
+    if (filterHasPoster) {
+      const poster = details.item.poster_path;
+      const hasPoster = poster && (poster.startsWith("http://") || poster.startsWith("https://"));
+      if (!hasPoster) return false;
+    }
+
     return titleMatch && tagMatch;
   });
 
@@ -486,27 +627,43 @@ export const Library: React.FC = () => {
             </div>
           </div>
 
-          {/* SEARCH & FILTER FILTERS */}
-          <div className="flex space-x-4 items-center">
+          {/* SEARCH & FILTERS ROW */}
+          <div className="flex space-x-2 items-center">
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-2.5 text-gray-500" size={16} />
-              <input
-                type="text"
-                placeholder="Search collection assets..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent"
-              />
+              <input type="text" placeholder="Search collection assets..."
+                value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-xs focus:outline-none focus:border-accent" />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery("")}
+                  className="absolute right-3 top-2.5 text-gray-500 hover:text-gray-200">
+                  <X size={14} />
+                </button>
+              )}
             </div>
-            
+
+            {/* FILTERS toggle */}
+            <button onClick={() => setShowFilters(p => !p)}
+              className={`flex items-center space-x-1.5 text-xs font-bold px-3 py-2 rounded-lg border transition-all ${
+                showFilters || activeFilterCount > 0
+                  ? "bg-accent/15 text-accent border-accent/30"
+                  : "bg-gray-900 border-gray-800 text-gray-400 hover:text-gray-200"
+              }`}>
+              <SlidersHorizontal size={14} />
+              <span>FILTERS</span>
+              {activeFilterCount > 0 && (
+                <span className="bg-accent text-background text-[9px] font-black px-1.5 py-0.5 rounded-full">
+                  {activeFilterCount}
+                </span>
+              )}
+              {showFilters ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            </button>
+
             {/* Sort Dropdown */}
             <div className="flex items-center space-x-2 shrink-0 bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-xs focus-within:border-accent">
-              <span className="text-gray-500 text-[10px] tracking-widest font-extrabold uppercase">SORT BY:</span>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
-                className="bg-transparent text-gray-200 focus:outline-none cursor-pointer font-sans"
-              >
+              <span className="text-gray-500 text-[10px] tracking-widest font-extrabold uppercase">SORT:</span>
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
+                className="bg-transparent text-gray-200 focus:outline-none cursor-pointer font-sans">
                 <option value="alphabetical" className="bg-gray-950 text-gray-200">Alphabetical</option>
                 <option value="quality_score" className="bg-gray-950 text-gray-200">Quality Score</option>
                 <option value="imdb_score" className="bg-gray-950 text-gray-200">IMDb Score</option>
@@ -516,15 +673,176 @@ export const Library: React.FC = () => {
               </select>
             </div>
 
-            {/* Sort Direction Toggle */}
-            <button
-              onClick={() => setSortDirection(prev => prev === "asc" ? "desc" : "asc")}
-              className="bg-gray-900 border border-gray-800 rounded-lg p-2.5 hover:border-accent hover:text-accent transition-colors flex items-center justify-center shrink-0 focus:outline-none text-gray-400"
-              title={sortDirection === "asc" ? "Sort Ascending" : "Sort Descending"}
-            >
+            {/* Sort Direction */}
+            <button onClick={() => setSortDirection(prev => prev === "asc" ? "desc" : "asc")}
+              className="bg-gray-900 border border-gray-800 rounded-lg p-2.5 hover:border-accent hover:text-accent transition-colors flex items-center justify-center shrink-0 text-gray-400"
+              title={sortDirection === "asc" ? "Sort Ascending" : "Sort Descending"}>
               {sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
             </button>
+
+            {/* SELECT MODE toggle */}
+            <button onClick={() => { setIsSelecting(p => !p); setSelectedIds(new Set()); }}
+              className={`flex items-center space-x-1.5 text-xs font-bold px-3 py-2 rounded-lg border transition-all ${
+                isSelecting ? "bg-accent/15 text-accent border-accent/30" : "bg-gray-900 border-gray-800 text-gray-400 hover:text-gray-200"
+              }`}>
+              {isSelecting ? <CheckSquare size={14} /> : <Square size={14} />}
+              <span>SELECT</span>
+            </button>
           </div>
+
+          {/* ADVANCED FILTER PANEL */}
+          {showFilters && (
+            <div className="bg-gray-900/80 border border-gray-800 rounded-lg p-4 space-y-4 animate-in fade-in duration-200">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] font-bold text-accent uppercase tracking-widest">Advanced Filters</span>
+                <div className="flex items-center space-x-2">
+                  {activeFilterCount > 0 && (
+                    <button onClick={clearFilters}
+                      className="text-[10px] font-bold text-rose-400 hover:text-rose-300 flex items-center space-x-1">
+                      <X size={10} /><span>CLEAR ALL</span>
+                    </button>
+                  )}
+                  <span className="text-[9px] text-gray-600">{filteredItems.length} of {items.length} shown</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 text-[10px]">
+                {/* Genres */}
+                <div className="space-y-1.5 col-span-2">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Genres</p>
+                  <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto pr-1">
+                    {allGenres.slice(0, 30).map(g => (
+                      <button key={g} onClick={() => setFilterGenres(prev => {
+                        const next = new Set(prev);
+                        if (next.has(g)) next.delete(g); else next.add(g);
+                        return next;
+                      })} className={`px-2 py-0.5 rounded border text-[9px] font-bold transition-all ${
+                        filterGenres.has(g)
+                          ? "bg-accent/20 border-accent/40 text-accent"
+                          : "bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200"
+                      }`}>{g}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Year Range */}
+                <div className="space-y-1.5">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Year Range</p>
+                  <div className="flex items-center space-x-2">
+                    <input type="number" value={filterMinYear} min={libMinYear} max={filterMaxYear}
+                      onChange={e => setFilterMinYear(parseInt(e.target.value) || libMinYear)}
+                      className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-200 focus:outline-none focus:border-accent" />
+                    <span className="text-gray-600">–</span>
+                    <input type="number" value={filterMaxYear} min={filterMinYear} max={libMaxYear}
+                      onChange={e => setFilterMaxYear(parseInt(e.target.value) || libMaxYear)}
+                      className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-200 focus:outline-none focus:border-accent" />
+                  </div>
+                </div>
+
+                {/* Resolution */}
+                <div className="space-y-1.5">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Resolution</p>
+                  <div className="space-y-1">
+                    {["4K", "1080p", "720p", "SD"].map(r => (
+                      <label key={r} className="flex items-center space-x-2 cursor-pointer">
+                        <input type="checkbox" checked={filterResolutions.has(r)}
+                          onChange={() => setFilterResolutions(prev => {
+                            const next = new Set(prev);
+                            if (next.has(r)) next.delete(r); else next.add(r);
+                            return next;
+                          })} className="accent-cyan-400" />
+                        <span className={filterResolutions.has(r) ? "text-accent font-bold" : "text-gray-400"}>{r}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Codec */}
+                <div className="space-y-1.5">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Video Codec</p>
+                  <div className="space-y-1">
+                    {["H.264", "H.265", "AV1", "VP9", "Other"].map(c => (
+                      <label key={c} className="flex items-center space-x-2 cursor-pointer">
+                        <input type="checkbox" checked={filterCodecs.has(c)}
+                          onChange={() => setFilterCodecs(prev => {
+                            const next = new Set(prev);
+                            if (next.has(c)) next.delete(c); else next.add(c);
+                            return next;
+                          })} className="accent-cyan-400" />
+                        <span className={filterCodecs.has(c) ? "text-accent font-bold" : "text-gray-400"}>{c}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Quality Score */}
+                <div className="space-y-1.5">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Min Quality Score</p>
+                  <div className="flex items-center space-x-2">
+                    <input type="range" min={0} max={100} step={5} value={filterMinQuality}
+                      onChange={e => setFilterMinQuality(parseInt(e.target.value))}
+                      className="flex-1 accent-cyan-400 h-1" />
+                    <span className="text-accent font-bold w-8 text-right">{filterMinQuality}</span>
+                  </div>
+                  {filterMinQuality > 0 && <p className="text-[9px] text-gray-600">Showing ≥ {filterMinQuality} quality</p>}
+                </div>
+
+                {/* Toggles */}
+                <div className="space-y-2">
+                  <p className="font-bold text-gray-500 uppercase tracking-wider">Attributes</p>
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" checked={filterHasSubs}
+                      onChange={e => setFilterHasSubs(e.target.checked)} className="accent-cyan-400" />
+                    <span className={filterHasSubs ? "text-accent font-bold" : "text-gray-400"}>Has Subtitles</span>
+                  </label>
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" checked={filterHasPoster}
+                      onChange={e => setFilterHasPoster(e.target.checked)} className="accent-cyan-400" />
+                    <span className={filterHasPoster ? "text-accent font-bold" : "text-gray-400"}>Has Poster Art</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* BULK ACTION TOOLBAR */}
+          {isSelecting && (
+            <div className="flex items-center justify-between bg-gray-900 border border-accent/20 rounded-lg px-4 py-2.5">
+              <div className="flex items-center space-x-3">
+                <button onClick={() => {
+                  const allVisible = sortedFilteredItems.map(d => d.item.id);
+                  setSelectedIds(prev => prev.size === allVisible.length ? new Set() : new Set(allVisible));
+                }} className="text-[10px] font-bold text-accent hover:text-cyan-300 flex items-center space-x-1.5">
+                  <CheckSquare size={12} />
+                  <span>{selectedIds.size === sortedFilteredItems.length ? "DESELECT ALL" : "SELECT ALL"}</span>
+                </button>
+                <span className="text-[10px] text-gray-500 font-bold">
+                  {selectedIds.size} / {sortedFilteredItems.length} SELECTED
+                </span>
+                {bulkProgress && (
+                  <span className="text-[10px] text-amber-400 font-bold animate-pulse">
+                    {bulkProgress.label}: {bulkProgress.done}/{bulkProgress.total}
+                  </span>
+                )}
+              </div>
+              {selectedIds.size > 0 && !bulkProgress && (
+                <div className="flex items-center space-x-2">
+                  <button onClick={() => handleBulkAction("rescan")}
+                    className="flex items-center space-x-1.5 bg-blue-500/10 border border-blue-500/30 text-blue-400 hover:bg-blue-500/20 text-[10px] font-bold px-3 py-1.5 rounded transition-all">
+                    <RefreshCw size={11} /><span>RE-SCAN METADATA</span>
+                  </button>
+                  <button onClick={() => handleBulkAction("quality")}
+                    className="flex items-center space-x-1.5 bg-purple-500/10 border border-purple-500/30 text-purple-400 hover:bg-purple-500/20 text-[10px] font-bold px-3 py-1.5 rounded transition-all">
+                    <Zap size={11} /><span>QUALITY SCORE</span>
+                  </button>
+                  <button onClick={() => { if (window.confirm(`Remove ${selectedIds.size} items from library?`)) handleBulkAction("remove"); }}
+                    className="flex items-center space-x-1.5 bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 text-[10px] font-bold px-3 py-1.5 rounded transition-all">
+                    <Trash2 size={11} /><span>REMOVE ({selectedIds.size})</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex space-x-1.5 overflow-x-auto w-full scrollbar-none">
               {libraryTabs.map((tab) => {
                 const isNotFound = tab === "Not Found";
@@ -632,13 +950,15 @@ export const Library: React.FC = () => {
                         return (
                           <div
                               key={details.item.id}
-                              onClick={() => handleSelectCard(details)}
+                              onClick={() => isSelecting ? toggleSelect(details.item.id, {} as any) : handleSelectCard(details)}
                               className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
-                                isSelected 
-                                  ? "border-accent cyan-glow" 
-                                  : (isZeroDuration 
-                                      ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
-                                      : "border-gray-800 hover:border-gray-600")
+                                isSelecting && selectedIds.has(details.item.id)
+                                  ? "border-accent shadow-[0_0_12px_rgba(6,182,212,0.3)] scale-[1.01]"
+                                  : isSelected 
+                                    ? "border-accent cyan-glow" 
+                                    : (isZeroDuration 
+                                        ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
+                                        : "border-gray-800 hover:border-gray-600")
                               }`}
                             >
                               <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
@@ -648,6 +968,21 @@ export const Library: React.FC = () => {
                                   className="w-full h-full object-cover"
                                   loading="lazy"
                                 />
+
+                                {/* Bulk select checkbox overlay */}
+                                {isSelecting && (
+                                  <div className={`absolute inset-0 flex items-center justify-center transition-all ${
+                                    selectedIds.has(details.item.id) ? "bg-accent/20" : "bg-black/0 hover:bg-black/20"
+                                  }`}>
+                                    <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center transition-all ${
+                                      selectedIds.has(details.item.id)
+                                        ? "bg-accent border-accent text-background"
+                                        : "bg-black/50 border-gray-400"
+                                    }`}>
+                                      {selectedIds.has(details.item.id) && <CheckSquare size={16} />}
+                                    </div>
+                                  </div>
+                                )}
                               
                               {/* Classic Film Toggle Overlay (Top Right) */}
                               <button
@@ -1319,13 +1654,15 @@ export const Library: React.FC = () => {
                     return (
                       <div
                         key={details.item.id}
-                        onClick={() => handleSelectCard(details)}
+                        onClick={() => isSelecting ? toggleSelect(details.item.id, {} as any) : handleSelectCard(details)}
                         className={`bg-panel border rounded-lg overflow-hidden cursor-pointer hover:scale-[1.02] transition-all duration-200 shadow-lg ${
-                          isSelected 
-                            ? "border-accent cyan-glow" 
-                            : (isZeroDuration 
-                                ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
-                                : "border-gray-800 hover:border-gray-600")
+                          isSelecting && selectedIds.has(details.item.id)
+                            ? "border-accent shadow-[0_0_12px_rgba(6,182,212,0.3)] scale-[1.01]"
+                            : isSelected 
+                              ? "border-accent cyan-glow" 
+                              : (isZeroDuration 
+                                  ? "border-2 border-red-500 shadow-[0_0_18px_rgba(239,68,68,0.35)] hover:border-red-400" 
+                                  : "border-gray-800 hover:border-gray-600")
                         }`}
                       >
                         <div className="aspect-[2/3] bg-gray-950 flex items-center justify-center relative overflow-hidden">
@@ -1335,7 +1672,22 @@ export const Library: React.FC = () => {
                             className="w-full h-full object-cover"
                             loading="lazy"
                           />
-                          
+
+                          {/* Bulk select checkbox overlay */}
+                          {isSelecting && (
+                            <div className={`absolute inset-0 flex items-center justify-center transition-all ${
+                              selectedIds.has(details.item.id) ? "bg-accent/20" : "bg-black/0 hover:bg-black/20"
+                            }`}>
+                              <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center transition-all ${
+                                selectedIds.has(details.item.id)
+                                  ? "bg-accent border-accent text-background"
+                                  : "bg-black/50 border-gray-400"
+                              }`}>
+                                {selectedIds.has(details.item.id) && <CheckSquare size={16} />}
+                              </div>
+                            </div>
+                          )}
+
                           {/* Classic Film Toggle Overlay (Top Right) */}
                           <button
                             onClick={async (e) => {

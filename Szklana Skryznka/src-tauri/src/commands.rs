@@ -12,6 +12,8 @@ use crate::playout::get_playout_state;
 use crate::scanner::scan_directory;
 use crate::scheduler::generate_auto_schedule;
 use tracing::info;
+#[cfg(unix)]
+extern crate libc;
 
 // Wrap the pool inside State
 pub type DbState<'a> = State<'a, SqlitePool>;
@@ -561,12 +563,34 @@ pub async fn read_subtitle_content(
 }
 
 #[tauri::command]
-pub async fn record_movie_played(pool: DbState<'_>, media_item_id: String) -> Result<(), String> {
+pub async fn record_movie_played(
+    pool: DbState<'_>,
+    media_item_id: String,
+    channel_id: Option<String>,
+    duration_aired: Option<i32>,
+) -> Result<(), String> {
+    // 1. Increment play count
     sqlx::query("UPDATE media_items SET play_count = coalesce(play_count, 0) + 1 WHERE id = $1")
         .bind(&media_item_id)
         .execute(&*pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 2. Write playback_history row if channel is known
+    let ch = channel_id.unwrap_or_else(|| "chan_default".to_string());
+    let dur = duration_aired.unwrap_or(0);
+    let history_id = format!("ph_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO playback_history (id, channel_id, media_item_id, aired_at, duration_aired) \
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4)"
+    )
+    .bind(&history_id)
+    .bind(&ch)
+    .bind(&media_item_id)
+    .bind(dur)
+    .execute(&*pool)
+    .await;
+
     Ok(())
 }
 
@@ -706,14 +730,136 @@ pub async fn delete_schedule_entry(pool: DbState<'_>, entry_id: String) -> Resul
 
 #[tauri::command]
 pub async fn apply_template(
-    _pool: DbState<'_>,
+    pool: DbState<'_>,
     channel_id: String,
     template_id: String,
-    _start_time_iso: String,
+    start_time_iso: String,
 ) -> Result<String, String> {
-    // Basic structural implementation mapping to schedule generator
-    info!("Template apply: channel_id={}, template_id={}", channel_id, template_id);
-    Ok("Template applied (mock integration)".to_string())
+    info!("Template apply: channel_id={}, template_id={}, start={}", channel_id, template_id, start_time_iso);
+
+    let day_start = DateTime::parse_from_rfc3339(&start_time_iso)
+        .map_err(|e| e.to_string())?
+        .with_timezone(&Utc);
+
+    // Fetch template entries ordered by offset
+    let entries = sqlx::query(
+        "SELECT offset_seconds, duration_seconds, media_type_filter, genre_filter, is_filler \
+         FROM template_entries WHERE template_id = $1 ORDER BY offset_seconds ASC"
+    )
+    .bind(&template_id)
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if entries.is_empty() {
+        return Err("Template has no entries defined".to_string());
+    }
+
+    let mut inserted = 0usize;
+    for entry in entries {
+        let offset_secs: i64 = entry.get::<i64, _>("offset_seconds");
+        let duration_secs: i64 = entry.get::<i64, _>("duration_seconds");
+        let type_filter: Option<String> = entry.get("media_type_filter");
+        let genre_filter: Option<String> = entry.get("genre_filter");
+        let is_filler: i64 = entry.get("is_filler");
+
+        let slot_start = day_start + Duration::seconds(offset_secs);
+        let slot_end = slot_start + Duration::seconds(duration_secs);
+
+        // Skip if slot is already occupied
+        let conflict: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM schedule_entries se \
+             JOIN schedules s ON se.schedule_id = s.id \
+             WHERE s.channel_id = $1 AND se.start_time < $2 AND se.end_time > $3"
+        )
+        .bind(&channel_id)
+        .bind(slot_end.to_rfc3339())
+        .bind(slot_start.to_rfc3339())
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(0);
+
+        if conflict > 0 {
+            continue;
+        }
+
+        // If filler, skip (bumper insertion is handled by scheduler)
+        if is_filler == 1 {
+            continue;
+        }
+
+        // Pick a matching media_item from the library
+        let mut query = String::from(
+            "SELECT mi.id, mf.duration FROM media_items mi \
+             JOIN media_files mf ON mf.media_item_id = mi.id \
+             WHERE mf.duration > 0"
+        );
+        if let Some(ref mt) = type_filter {
+            query.push_str(&format!(" AND mi.media_type = '{}'", mt.replace('\'', "''")));
+        }
+        if let Some(ref genre) = genre_filter {
+            query.push_str(&format!(
+                " AND mi.id IN (SELECT mt2.media_item_id FROM media_tags mt2 \
+                 JOIN tags tg ON tg.id = mt2.tag_id WHERE tg.name = '{}')",
+                genre.replace('\'', "''") 
+            ));
+        }
+        query.push_str(" ORDER BY mi.play_count ASC, RANDOM() LIMIT 1");
+
+        let picked = sqlx::query(&query)
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(item_row) = picked {
+            let media_item_id: String = item_row.get("id");
+            let actual_duration: f64 = item_row.get("duration");
+            let actual_end = slot_start + Duration::seconds(actual_duration as i64);
+
+            // Ensure a schedule record exists for this channel
+            let schedule_id: String = {
+                let existing: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM schedules WHERE channel_id = $1 LIMIT 1"
+                )
+                .bind(&channel_id)
+                .fetch_optional(&*pool)
+                .await
+                .unwrap_or(None);
+                if let Some(id) = existing {
+                    id
+                } else {
+                    let new_id = format!("sched_{}", uuid::Uuid::new_v4());
+                    sqlx::query(
+                        "INSERT INTO schedules (id, channel_id, name) VALUES ($1, $2, 'Main Schedule')"
+                    )
+                    .bind(&new_id)
+                    .bind(&channel_id)
+                    .execute(&*pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    new_id
+                }
+            };
+
+            let entry_id = format!("se_{}", uuid::Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO schedule_entries (id, schedule_id, media_item_id, start_time, end_time, is_locked) \
+                 VALUES ($1, $2, $3, $4, $5, 0)"
+            )
+            .bind(&entry_id)
+            .bind(&schedule_id)
+            .bind(&media_item_id)
+            .bind(slot_start.to_rfc3339())
+            .bind(actual_end.to_rfc3339())
+            .execute(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            inserted += 1;
+        }
+    }
+
+    Ok(format!("Template applied: {} entries scheduled", inserted))
 }
 
 #[tauri::command]
@@ -978,7 +1124,11 @@ pub async fn get_schedule_entries(
     for entry in entries {
         let row = sqlx::query(
             "SELECT mi.title, mi.media_type, mi.runtime, mi.poster_path, mi.backdrop_path, \
-             mf.file_path, mf.audio_tracks, mf.audio_language, mf.embedded_subtitles \
+             mi.synopsis, mi.year, \
+             mf.file_path, mf.audio_tracks, mf.audio_language, mf.embedded_subtitles, \
+             (SELECT d.name FROM directors d \
+              JOIN media_directors md ON d.id = md.director_id \
+              WHERE md.media_item_id = mi.id LIMIT 1) AS director \
              FROM media_items mi \
              LEFT JOIN media_files mf ON mf.media_item_id = mi.id \
              WHERE mi.id = $1 LIMIT 1"
@@ -997,6 +1147,9 @@ pub async fn get_schedule_entries(
         let audio_tracks: Option<String> = row.get("audio_tracks");
         let audio_language: Option<String> = row.get("audio_language");
         let embedded_subtitles: Option<String> = row.get("embedded_subtitles");
+        let synopsis: Option<String> = row.get("synopsis");
+        let year: Option<i32> = row.get("year");
+        let director: Option<String> = row.get("director");
 
         details.push(ScheduleEntryDetails {
             entry,
@@ -1009,6 +1162,9 @@ pub async fn get_schedule_entries(
             audio_tracks,
             audio_language,
             embedded_subtitles,
+            synopsis,
+            year,
+            director,
         });
     }
 
@@ -1094,20 +1250,65 @@ pub async fn purge_database(app: tauri::AppHandle, pool: DbState<'_>, target: St
 }
 
 #[tauri::command]
-pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::Value>, String> {
-    let rows = sqlx::query(
-        "SELECT id, title, year, director, cast_actors, synopsis, rating, poster_path \
-         FROM all_movies \
-         WHERE title NOT IN (SELECT title FROM media_items) \
-         ORDER BY RANDOM() \
-         LIMIT 10"
+pub async fn get_smart_suggestions(
+    pool: DbState<'_>,
+    min_rating: Option<f64>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rating_threshold = min_rating.unwrap_or(7.5);
+
+    // ── Step 1: Derive top 3 genres from the user's most-played library content ──
+    let top_genres: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM tags t \
+         JOIN media_tags mt ON mt.tag_id = t.id \
+         JOIN media_items mi ON mi.id = mt.media_item_id \
+         WHERE t.tag_type = 'genre' AND mi.play_count > 0 \
+         GROUP BY t.id ORDER BY SUM(mi.play_count) DESC LIMIT 3"
     )
     .fetch_all(&*pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .unwrap_or_default();
 
+    let use_affinity = !top_genres.is_empty();
+
+    // ── Step 2: Query all_movies, boosting affinity genres ──
+    // Build a CASE weight expression based on genre matches in the title/synopsis (best-effort
+    // since all_movies has no genre column — we search synopsis + title keywords)
+    let genre_keywords: Vec<String> = top_genres.clone();
+
+    let rows = if use_affinity && !genre_keywords.is_empty() {
+        // Weighted: items whose synopsis mentions a favourite genre rank higher
+        let like_clauses: Vec<String> = genre_keywords
+            .iter()
+            .map(|g| format!("(LOWER(synopsis) LIKE '%{}%' OR LOWER(title) LIKE '%{}%')",
+                g.to_lowercase(), g.to_lowercase()))
+            .collect();
+        let affinity_expr = like_clauses.join(" OR ");
+        let q = format!(
+            "SELECT id, title, year, director, cast_actors, synopsis, rating, poster_path, \
+             CASE WHEN ({}) THEN 1 ELSE 0 END AS affinity_hit \
+             FROM all_movies \
+             WHERE title NOT IN (SELECT title FROM media_items) \
+             AND rating >= {} \
+             ORDER BY affinity_hit DESC, rating DESC, RANDOM() \
+             LIMIT 20",
+            affinity_expr, rating_threshold
+        );
+        sqlx::query(&q).fetch_all(&*pool).await.map_err(|e| e.to_string())?
+    } else {
+        let q = format!(
+            "SELECT id, title, year, director, cast_actors, synopsis, rating, poster_path, 0 AS affinity_hit \
+             FROM all_movies \
+             WHERE title NOT IN (SELECT title FROM media_items) \
+             AND rating >= {} \
+             ORDER BY RANDOM() LIMIT 20",
+            rating_threshold
+        );
+        sqlx::query(&q).fetch_all(&*pool).await.map_err(|e| e.to_string())?
+    };
+
+    // Take up to 10, prefer affinity hits first (already sorted)
     let mut results = Vec::new();
-    for row in rows {
+    for row in rows.into_iter().take(10) {
         let id: String = row.get("id");
         let title: String = row.get("title");
         let year: i32 = row.get("year");
@@ -1116,6 +1317,15 @@ pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::
         let synopsis: String = row.get("synopsis");
         let rating: f64 = row.get("rating");
         let poster_path: Option<String> = row.get("poster_path");
+        let affinity_hit: i32 = row.get("affinity_hit");
+
+        let source_engine = if use_affinity && affinity_hit == 1 {
+            format!("Genre Affinity ({})", top_genres.join(", "))
+        } else if use_affinity {
+            "Library Match".to_string()
+        } else {
+            "Curated Discovery".to_string()
+        };
 
         results.push(serde_json::json!({
             "id": id,
@@ -1126,7 +1336,8 @@ pub async fn get_smart_suggestions(pool: DbState<'_>) -> Result<Vec<serde_json::
             "synopsis": synopsis,
             "rating": rating,
             "poster_path": poster_path,
-            "sourceEngine": "Global Top 100k Database"
+            "sourceEngine": source_engine,
+            "affinityHit": affinity_hit == 1,
         }));
     }
 
@@ -1645,9 +1856,11 @@ pub async fn download_opensubtitles(
 }
 
 pub struct TranscoderState {
-    pub process:      tokio::sync::Mutex<Option<std::process::Child>>,
-    pub current_file: tokio::sync::Mutex<Option<String>>,
-    pub is_launching: std::sync::atomic::AtomicBool,
+    pub process:           tokio::sync::Mutex<Option<std::process::Child>>,
+    pub current_file:      tokio::sync::Mutex<Option<String>>,
+    pub playout_start_sec: std::sync::atomic::AtomicU64,
+    pub process_group_id:  std::sync::atomic::AtomicI32, // PGID for clean kill
+    pub is_launching:      std::sync::atomic::AtomicBool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -1655,6 +1868,7 @@ pub struct HlsStatus {
     pub is_streaming: bool,
     pub current_file: Option<String>,
     pub hls_url: String,
+    pub playout_start_sec: f64,
 }
 
 pub fn url_encode(s: &str) -> String {
@@ -1809,11 +2023,12 @@ pub async fn start_transcode(
     let segment_path_pattern = hls_dir.join("stream-%05d.ts").to_string_lossy().to_string();
     let m3u8_path_str = m3u8_path.to_string_lossy().to_string();
 
-    // 6. Build ffmpeg args — -ss BEFORE -i for fast keyframe seek with bounded threads and sliding window
+    // 6. Build ffmpeg args — -ss BEFORE -i for fast keyframe seek
+    //    Global -threads applies to demuxer/decoder; libx264 is separately capped via -x264-params
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-nostdin".into(),
-        "-threads".into(), "4".into(),
+        "-threads".into(), "4".into(),   // demuxer/decoder thread cap
         "-ss".into(), format!("{:.3}", start_time_sec),
         "-i".into(), file_path.clone(),
     ];
@@ -1828,6 +2043,9 @@ pub async fn start_transcode(
         "-c:v".into(), "libx264".into(),
         "-preset".into(), "veryfast".into(),
         "-b:v".into(), if is_4k { "4000k".into() } else { "3000k".into() },
+        // Hard-cap x264's internal thread pool — prevents runaway multi-core usage.
+        // Without this, x264 spawns one thread per logical core regardless of -threads.
+        "-x264-params".into(), "threads=4:lookahead_threads=2".into(),
     ]);
     if is_4k {
         args.extend(["-vf".into(), "scale=-2:1080".into()]);
@@ -1838,8 +2056,8 @@ pub async fn start_transcode(
         "-ac".into(), "2".into(),
         "-ar".into(), "44100".into(),
         "-f".into(), "hls".into(),
-        "-hls_time".into(), "2".into(),
-        "-hls_list_size".into(), "6".into(),
+        "-hls_time".into(), "4".into(),
+        "-hls_list_size".into(), "10".into(),
         "-hls_flags".into(), "delete_segments+split_by_time".into(),
         "-hls_segment_filename".into(), segment_path_pattern,
         m3u8_path_str,
@@ -1853,23 +2071,37 @@ pub async fn start_transcode(
         .map(std::process::Stdio::from)
         .unwrap_or_else(|_| std::process::Stdio::null());
 
-    // Spawn ffmpeg — it inherits our process's TCC file grants
-    let child = std::process::Command::new(&ffmpeg_bin)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(stderr_file)
-        .spawn()
-        .map_err(|e| {
-            state.is_launching.store(false, Ordering::SeqCst);
-            format!("Failed to launch ffmpeg ({}): {}", ffmpeg_bin.display(), e)
-        })?;
+    // Spawn ffmpeg in its own process group so we can kill the entire group cleanly.
+    // pre_exec(setsid) runs after fork() but before exec() — making ffmpeg the session leader.
+    let mut cmd = std::process::Command::new(&ffmpeg_bin);
+    cmd.args(&args)
+       .stdout(std::process::Stdio::null())
+       .stderr(stderr_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
+    }
+    let child = cmd.spawn().map_err(|e| {
+        state.is_launching.store(false, std::sync::atomic::Ordering::SeqCst);
+        format!("Failed to launch ffmpeg ({}): {}", ffmpeg_bin.display(), e)
+    })?;
 
-    // 8. Store process handle
+    // 8. Store process handle, PGID, and start offset
     {
         let mut proc_lock = state.process.lock().await;
+        // Capture PGID immediately after spawn (before the child can die)
+        #[cfg(unix)]
+        {
+            let pgid = unsafe { libc::getpgid(child.id() as libc::pid_t) };
+            state.process_group_id.store(pgid, std::sync::atomic::Ordering::SeqCst);
+            info!("start_transcode: ffmpeg pid={} pgid={}", child.id(), pgid);
+        }
         *proc_lock = Some(child);
         let mut file_lock = state.current_file.lock().await;
         *file_lock = Some(file_path);
+        // Store the start offset so TvClient can compute content position
+        state.playout_start_sec.store(start_time_sec.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 
     // 9. Poll until m3u8 and first segment are ready (timeout 15s)
@@ -1916,6 +2148,7 @@ pub async fn start_transcode(
 #[tauri::command]
 pub async fn get_hls_status(state: State<'_, TranscoderState>) -> Result<HlsStatus, String> {
     let current_file = state.current_file.lock().await.clone();
+    let playout_start_sec = f64::from_bits(state.playout_start_sec.load(std::sync::atomic::Ordering::Relaxed));
     let is_streaming = {
         let mut proc_lock = state.process.lock().await;
         if let Some(ref mut child) = *proc_lock {
@@ -1929,6 +2162,7 @@ pub async fn get_hls_status(state: State<'_, TranscoderState>) -> Result<HlsStat
         is_streaming,
         current_file,
         hls_url: "http://127.0.0.1:8098/hls/stream.m3u8".to_string(),
+        playout_start_sec,
     })
 }
 
@@ -1940,11 +2174,25 @@ pub async fn stop_transcode(
     use std::sync::atomic::Ordering;
     info!("stop_transcode: killing ffmpeg transcoder process and cleaning buffers");
 
+    // Kill by process group first (catches any children ffmpeg may have spawned)
+    #[cfg(unix)]
+    {
+        let pgid = state.process_group_id.load(Ordering::SeqCst);
+        if pgid > 1 {
+            info!("stop_transcode: sending SIGKILL to process group {}", pgid);
+            unsafe { libc::killpg(pgid, libc::SIGKILL); }
+            state.process_group_id.store(0, Ordering::SeqCst);
+        }
+    }
+
+    // Also kill via the stored Child handle (belt-and-suspenders)
     let mut lock = state.process.lock().await;
     if let Some(mut child) = lock.take() {
         let _ = child.kill();
         let _ = child.wait();
     }
+    drop(lock);
+
     let mut file_lock = state.current_file.lock().await;
     *file_lock = None;
     state.is_launching.store(false, Ordering::SeqCst);
@@ -2359,4 +2607,454 @@ pub async fn list_media_streams(path: String) -> Result<serde_json::Value, Strin
 #[tauri::command]
 pub async fn extract_media_thumbnail(path: String, timestamp: f64) -> Result<String, String> {
     crate::media_engine::extract_thumbnail_frame(&path, timestamp).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WATCHLIST COMMANDS (suggestion watchlist — tracks movies from the all_movies
+// reference DB that the user wants to acquire for their library)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn add_to_suggestion_watchlist(
+    pool: DbState<'_>,
+    all_movie_id: String,
+    title: String,
+    year: Option<i32>,
+    director: Option<String>,
+    synopsis: Option<String>,
+    rating: Option<f64>,
+    poster_path: Option<String>,
+) -> Result<String, String> {
+    let id = format!("sw_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    sqlx::query(
+        "INSERT OR IGNORE INTO suggestion_watchlists \
+         (id, all_movie_id, title, year, director, synopsis, rating, poster_path) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    )
+    .bind(&id)
+    .bind(&all_movie_id)
+    .bind(&title)
+    .bind(year)
+    .bind(&director)
+    .bind(&synopsis)
+    .bind(rating)
+    .bind(&poster_path)
+    .execute(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn get_suggestion_watchlist(pool: DbState<'_>) -> Result<Vec<serde_json::Value>, String> {
+    let rows = sqlx::query(
+        "SELECT id, all_movie_id, title, year, director, synopsis, rating, poster_path, added_at \
+         FROM suggestion_watchlists ORDER BY added_at DESC"
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let results = rows.iter().map(|row| {
+        serde_json::json!({
+            "id": row.get::<String, _>("id"),
+            "all_movie_id": row.get::<String, _>("all_movie_id"),
+            "title": row.get::<String, _>("title"),
+            "year": row.get::<Option<i32>, _>("year"),
+            "director": row.get::<Option<String>, _>("director"),
+            "synopsis": row.get::<Option<String>, _>("synopsis"),
+            "rating": row.get::<Option<f64>, _>("rating"),
+            "poster_path": row.get::<Option<String>, _>("poster_path"),
+            "added_at": row.get::<String, _>("added_at"),
+        })
+    }).collect();
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn remove_from_suggestion_watchlist(pool: DbState<'_>, id: String) -> Result<(), String> {
+    sqlx::query("DELETE FROM suggestion_watchlists WHERE id = $1")
+        .bind(&id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANNEL MANAGEMENT COMMANDS
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_channel(
+    pool: DbState<'_>,
+    name: String,
+    profile_name: String,
+) -> Result<Channel, String> {
+    let id = format!("chan_{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO channels (id, name, logo_path, profile_name, created_at, updated_at) \
+         VALUES ($1, $2, '', $3, $4, $4)"
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(&profile_name)
+    .bind(&now)
+    .execute(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(Channel {
+        id,
+        name,
+        logo_path: None,
+        profile_name: Some(profile_name),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_channel(pool: DbState<'_>, channel_id: String) -> Result<(), String> {
+    // Protect the default channel
+    if channel_id == "chan_default" {
+        return Err("Cannot delete the default channel.".to_string());
+    }
+    sqlx::query("DELETE FROM channels WHERE id = $1")
+        .bind(&channel_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLAYBACK HISTORY COMMAND
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_playback_history(pool: DbState<'_>, limit: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
+    let lim = limit.unwrap_or(100);
+    let rows = sqlx::query(
+        "SELECT ph.id, ph.channel_id, ph.media_item_id, ph.aired_at, ph.duration_aired, \
+                mi.title, mi.year, mi.poster_path, mi.media_type, ch.name as channel_name \
+         FROM playback_history ph \
+         JOIN media_items mi ON mi.id = ph.media_item_id \
+         JOIN channels ch ON ch.id = ph.channel_id \
+         ORDER BY ph.aired_at DESC \
+         LIMIT $1"
+    )
+    .bind(lim)
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let results = rows.iter().map(|row| {
+        serde_json::json!({
+            "id": row.get::<String, _>("id"),
+            "channel_id": row.get::<String, _>("channel_id"),
+            "channel_name": row.get::<String, _>("channel_name"),
+            "media_item_id": row.get::<String, _>("media_item_id"),
+            "title": row.get::<String, _>("title"),
+            "year": row.get::<Option<i32>, _>("year"),
+            "poster_path": row.get::<Option<String>, _>("poster_path"),
+            "media_type": row.get::<String, _>("media_type"),
+            "aired_at": row.get::<String, _>("aired_at"),
+            "duration_aired": row.get::<i32, _>("duration_aired"),
+        })
+    }).collect();
+    Ok(results)
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 2: SCHEDULE TEMPLATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub async fn get_schedule_templates(pool: DbState<'_>) -> Result<Vec<serde_json::Value>, String> {
+    let templates = sqlx::query(
+        "SELECT t.id, t.name, t.description, COUNT(te.id) as entry_count \
+         FROM schedule_templates t \
+         LEFT JOIN template_entries te ON te.template_id = t.id \
+         GROUP BY t.id ORDER BY t.name ASC"
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut results = vec![];
+    for row in templates {
+        let template_id: String = row.get("id");
+        let entries = sqlx::query(
+            "SELECT id, offset_seconds, duration_seconds, media_type_filter, genre_filter, is_filler \
+             FROM template_entries WHERE template_id = $1 ORDER BY offset_seconds ASC"
+        )
+        .bind(&template_id)
+        .fetch_all(&*pool)
+        .await
+        .unwrap_or_default();
+
+        let entries_json: Vec<serde_json::Value> = entries.iter().map(|e| serde_json::json!({
+            "id": e.get::<String, _>("id"),
+            "offsetSeconds": e.get::<i64, _>("offset_seconds"),
+            "durationSeconds": e.get::<i64, _>("duration_seconds"),
+            "mediaTypeFilter": e.get::<Option<String>, _>("media_type_filter"),
+            "genreFilter": e.get::<Option<String>, _>("genre_filter"),
+            "isFiller": e.get::<i64, _>("is_filler") == 1,
+        })).collect();
+
+        results.push(serde_json::json!({
+            "id": template_id,
+            "name": row.get::<String, _>("name"),
+            "description": row.get::<Option<String>, _>("description"),
+            "entryCount": row.get::<i64, _>("entry_count"),
+            "entries": entries_json,
+        }));
+    }
+    Ok(results)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TemplateEntryInput {
+    pub offset_seconds: i64,
+    pub duration_seconds: i64,
+    pub media_type_filter: Option<String>,
+    pub genre_filter: Option<String>,
+    pub is_filler: bool,
+}
+
+#[tauri::command]
+pub async fn create_schedule_template(
+    pool: DbState<'_>,
+    name: String,
+    description: Option<String>,
+    entries: Vec<TemplateEntryInput>,
+) -> Result<String, String> {
+    let template_id = format!("tmpl_{}", uuid::Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO schedule_templates (id, name, description) VALUES ($1, $2, $3)"
+    )
+    .bind(&template_id)
+    .bind(&name)
+    .bind(&description)
+    .execute(&*pool)
+    .await
+    .map_err(|e| format!("Failed to create template: {}", e))?;
+
+    for entry in &entries {
+        let entry_id = format!("te_{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO template_entries \
+             (id, template_id, offset_seconds, duration_seconds, media_type_filter, genre_filter, is_filler) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        )
+        .bind(&entry_id)
+        .bind(&template_id)
+        .bind(entry.offset_seconds)
+        .bind(entry.duration_seconds)
+        .bind(&entry.media_type_filter)
+        .bind(&entry.genre_filter)
+        .bind(entry.is_filler as i32)
+        .execute(&*pool)
+        .await
+        .map_err(|e| format!("Failed to insert entry: {}", e))?;
+    }
+
+    info!("Created schedule template '{}' with {} entries", name, entries.len());
+    Ok(template_id)
+}
+
+#[tauri::command]
+pub async fn delete_schedule_template(
+    pool: DbState<'_>,
+    template_id: String,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM schedule_templates WHERE id = $1")
+        .bind(&template_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 2: WATCHLIST → SCHEDULE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub async fn add_watchlist_item_to_schedule(
+    pool: DbState<'_>,
+    channel_id: String,
+    title: String,
+    preferred_date_iso: Option<String>,
+) -> Result<String, String> {
+    let item: Option<(String, f64)> = sqlx::query_as(
+        "SELECT mi.id, mf.duration FROM media_items mi \
+         JOIN media_files mf ON mf.media_item_id = mi.id \
+         WHERE LOWER(mi.title) = LOWER($1) AND mf.duration > 0 LIMIT 1"
+    )
+    .bind(&title)
+    .fetch_optional(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let (media_item_id, duration) = match item {
+        Some(row) => row,
+        None => return Err(format!("'{}' is not in your library. Import it first.", title)),
+    };
+
+    let after = preferred_date_iso
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    let horizon = after + Duration::days(7);
+    let latest_end: Option<String> = sqlx::query_scalar(
+        "SELECT MAX(se.end_time) FROM schedule_entries se \
+         JOIN schedules s ON se.schedule_id = s.id \
+         WHERE s.channel_id = $1 AND se.end_time > $2 AND se.end_time < $3"
+    )
+    .bind(&channel_id)
+    .bind(after.to_rfc3339())
+    .bind(horizon.to_rfc3339())
+    .fetch_optional(&*pool)
+    .await
+    .unwrap_or(None)
+    .flatten();
+
+    let slot_start = if let Some(end_str) = latest_end {
+        DateTime::parse_from_rfc3339(&end_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(after)
+    } else {
+        after
+    };
+    let slot_end = slot_start + Duration::seconds(duration as i64);
+
+    let schedule_id: String = {
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM schedules WHERE channel_id = $1 LIMIT 1"
+        )
+        .bind(&channel_id)
+        .fetch_optional(&*pool)
+        .await
+        .unwrap_or(None);
+        if let Some(id) = existing {
+            id
+        } else {
+            let new_id = format!("sched_{}", uuid::Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO schedules (id, channel_id, name) VALUES ($1, $2, 'Main Schedule')"
+            )
+            .bind(&new_id)
+            .bind(&channel_id)
+            .execute(&*pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            new_id
+        }
+    };
+
+    let entry_id = format!("se_{}", uuid::Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO schedule_entries (id, schedule_id, media_item_id, start_time, end_time, is_locked) \
+         VALUES ($1, $2, $3, $4, $5, 0)"
+    )
+    .bind(&entry_id)
+    .bind(&schedule_id)
+    .bind(&media_item_id)
+    .bind(slot_start.to_rfc3339())
+    .bind(slot_end.to_rfc3339())
+    .execute(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!("Watchlist->Schedule: '{}' scheduled at {}", title, slot_start);
+    Ok(format!(
+        "Scheduled '{}' at {}",
+        title,
+        slot_start.format("%a %d %b at %H:%M").to_string()
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SETTINGS: get_all_settings (get_setting / set_setting already exist above)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub async fn get_all_settings(
+    pool: DbState<'_>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let rows = sqlx::query("SELECT key, value FROM settings")
+        .fetch_all(&*pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let map = rows
+        .into_iter()
+        .map(|r| (r.get::<String, _>("key"), r.get::<String, _>("value")))
+        .collect();
+    Ok(map)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 3: GENRE AFFINITY HEATMAP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+pub async fn get_genre_heatmap(pool: DbState<'_>) -> Result<Vec<serde_json::Value>, String> {
+    // One query: for every (genre, day-of-week) pair count distinct airings
+    // SQLite's strftime('%w', ...) returns 0=Sun, 1=Mon, ..., 6=Sat
+    let rows = sqlx::query(
+        "SELECT g.name AS genre, \
+               strftime('%w', ph.aired_at) AS dow, \
+               COUNT(*) AS cnt \
+         FROM playback_history ph \
+         JOIN media_items mi ON mi.id = ph.media_item_id \
+         JOIN media_genres mg ON mg.media_item_id = mi.id \
+         JOIN genres g ON g.id = mg.genre_id \
+         GROUP BY g.name, dow \
+         ORDER BY g.name ASC, dow ASC"
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Aggregate into genre → [sun, mon, tue, wed, thu, fri, sat]
+    let mut map: std::collections::HashMap<String, [i64; 7]> = std::collections::HashMap::new();
+    for row in &rows {
+        let genre: String = row.get("genre");
+        let dow_str: String = row.get("dow");
+        let cnt: i64 = row.get("cnt");
+        let dow: usize = dow_str.parse::<usize>().unwrap_or(0).min(6);
+        let entry = map.entry(genre).or_insert([0i64; 7]);
+        entry[dow] = cnt;
+    }
+
+    // Sort genres by total plays descending, cap at top 15
+    let mut genres: Vec<(String, [i64; 7])> = map.into_iter().collect();
+    genres.sort_by(|a, b| {
+        let total_a: i64 = a.1.iter().sum();
+        let total_b: i64 = b.1.iter().sum();
+        total_b.cmp(&total_a)
+    });
+    genres.truncate(15);
+
+    let result = genres.into_iter().map(|(genre, days)| {
+        serde_json::json!({
+            "genre": genre,
+            "sun": days[0],
+            "mon": days[1],
+            "tue": days[2],
+            "wed": days[3],
+            "thu": days[4],
+            "fri": days[5],
+            "sat": days[6],
+            "total": days.iter().sum::<i64>(),
+        })
+    }).collect();
+
+    Ok(result)
 }

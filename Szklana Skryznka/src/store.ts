@@ -151,6 +151,9 @@ export interface ScheduleEntryDetails {
   audio_tracks?: string;
   audio_language?: string;
   embedded_subtitles?: string;
+  synopsis?: string;
+  year?: number;
+  director?: string;
 }
 
 export interface PlayoutState {
@@ -370,24 +373,35 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
 // --- CHANNEL STORE ---
 interface ChannelStore {
   channels: Channel[];
+  activeChannelId: string;
   playoutState: PlayoutState | null;
   isLoading: boolean;
   fetchChannels: () => Promise<void>;
+  setActiveChannelId: (id: string) => void;
   fetchPlayoutState: (channelId: string, currentIso: string) => Promise<void>;
+  createChannel: (name: string, profileName: string) => Promise<Channel>;
+  deleteChannel: (channelId: string) => Promise<void>;
 }
 
-export const useChannelStore = create<ChannelStore>((set) => ({
+export const useChannelStore = create<ChannelStore>((set, get) => ({
   channels: [],
+  activeChannelId: "chan_default",
   playoutState: null,
   isLoading: false,
   fetchChannels: async () => {
     try {
       const channels = await invoke<Channel[]>("get_channel_status");
       set({ channels });
+      // Keep activeChannelId valid
+      const { activeChannelId } = get();
+      if (channels.length > 0 && !channels.find(c => c.id === activeChannelId)) {
+        set({ activeChannelId: channels[0].id });
+      }
     } catch (e) {
       console.error(e);
     }
   },
+  setActiveChannelId: (id) => set({ activeChannelId: id }),
   fetchPlayoutState: async (channelId, currentIso) => {
     set({ isLoading: true });
     try {
@@ -396,6 +410,20 @@ export const useChannelStore = create<ChannelStore>((set) => ({
     } catch (e) {
       console.error(e);
       set({ isLoading: false });
+    }
+  },
+  createChannel: async (name, profileName) => {
+    const channel = await invoke<Channel>("create_channel", { name, profileName });
+    await get().fetchChannels();
+    set({ activeChannelId: channel.id });
+    return channel;
+  },
+  deleteChannel: async (channelId) => {
+    await invoke("delete_channel", { channelId });
+    await get().fetchChannels();
+    const { channels, activeChannelId } = get();
+    if (activeChannelId === channelId && channels.length > 0) {
+      set({ activeChannelId: channels[0].id });
     }
   },
 }));
@@ -512,3 +540,61 @@ export const useAnalysisStore = create<AnalysisStore>((set, get) => ({
   },
 }));
 
+// --- WATCHLIST STORE ---
+export interface WatchlistItem {
+  id: string;
+  all_movie_id: string;
+  title: string;
+  year?: number;
+  director?: string;
+  synopsis?: string;
+  rating?: number;
+  poster_path?: string;
+  added_at: string;
+}
+
+interface WatchlistStore {
+  items: WatchlistItem[];
+  isLoading: boolean;
+  fetchWatchlist: () => Promise<void>;
+  addItem: (movie: {
+    id: string; title: string; year?: number; director?: string;
+    synopsis?: string; rating?: number; poster_path?: string;
+  }) => Promise<void>;
+  removeItem: (id: string) => Promise<void>;
+  isInWatchlist: (allMovieId: string) => boolean;
+}
+
+export const useWatchlistStore = create<WatchlistStore>((set, get) => ({
+  items: [],
+  isLoading: false,
+  fetchWatchlist: async () => {
+    set({ isLoading: true });
+    try {
+      const items = await invoke<WatchlistItem[]>("get_suggestion_watchlist");
+      set({ items, isLoading: false });
+    } catch (e) {
+      console.error("Failed to fetch watchlist:", e);
+      set({ isLoading: false });
+    }
+  },
+  addItem: async (movie) => {
+    await invoke("add_to_suggestion_watchlist", {
+      allMovieId: movie.id,
+      title: movie.title,
+      year: movie.year ?? null,
+      director: movie.director ?? null,
+      synopsis: movie.synopsis ?? null,
+      rating: movie.rating ?? null,
+      posterPath: movie.poster_path ?? null,
+    });
+    await get().fetchWatchlist();
+  },
+  removeItem: async (id) => {
+    await invoke("remove_from_suggestion_watchlist", { id });
+    await get().fetchWatchlist();
+  },
+  isInWatchlist: (allMovieId) => {
+    return get().items.some(item => item.all_movie_id === allMovieId);
+  },
+}));

@@ -1,17 +1,51 @@
 import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useDiagnosticsStore, useLibraryStore } from "../store";
-import { BarChart3, RefreshCw, FileWarning, Copy, Play, Film, Clock, Award, ShieldCheck, Flame, Tv } from "lucide-react";
+import { BarChart3, RefreshCw, FileWarning, Copy, Play, Film, Clock, Award, ShieldCheck, Flame, Tv, History } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+
 
 export const Health: React.FC = () => {
   const { report, isLoading, fetchReport } = useDiagnosticsStore();
   const { items, fetchItems } = useLibraryStore();
-  const [activeTab, setActiveTab] = useState<"plays" | "telemetry" | "integrity">("plays");
+  const [activeTab, setActiveTab] = useState<"plays" | "telemetry" | "integrity" | "history" | "heatmap">("plays");
+  const [historyEntries, setHistoryEntries] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [heatmapData, setHeatmapData] = useState<any[]>([]);
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+
+  const fetchHeatmap = async () => {
+    setHeatmapLoading(true);
+    try {
+      const data = await invoke<any[]>("get_genre_heatmap");
+      setHeatmapData(data);
+    } catch (e) {
+      console.error("Failed to fetch genre heatmap:", e);
+    } finally {
+      setHeatmapLoading(false);
+    }
+  };
+
+  const fetchHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const entries = await invoke<any[]>("get_playback_history", { limit: 200 });
+      setHistoryEntries(entries);
+    } catch (e) {
+      console.error("Failed to fetch playback history:", e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
 
   useEffect(() => {
     fetchReport();
     fetchItems();
+    fetchHistory();
+    fetchHeatmap();
   }, [fetchReport, fetchItems]);
+
 
   const totalItems = items.length || 1;
 
@@ -87,7 +121,24 @@ export const Health: React.FC = () => {
               >
                 INTEGRITY AUDIT
               </button>
+              <button
+                onClick={() => { setActiveTab("history"); fetchHistory(); }}
+                className={`px-3 py-1 rounded text-[11px] font-bold transition-all ${
+                  activeTab === "history" ? "bg-accent text-background shadow" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                AIR HISTORY
+              </button>
+              <button
+                onClick={() => { setActiveTab("heatmap"); fetchHeatmap(); }}
+                className={`px-3 py-1 rounded text-[11px] font-bold transition-all ${
+                  activeTab === "heatmap" ? "bg-accent text-background shadow" : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                GENRE HEATMAP
+              </button>
             </div>
+
 
             <button
               onClick={() => {
@@ -366,7 +417,217 @@ export const Health: React.FC = () => {
             </div>
           </div>
         )}
+
+        {activeTab === "history" && (
+          <div className="flex-1 bg-panel border border-gray-800 rounded-lg p-4 flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-800 shrink-0">
+              <div className="flex items-center space-x-2 text-xs font-bold text-gray-300">
+                <History size={16} className="text-accent" />
+                <span>ON-AIR BROADCAST HISTORY TIMELINE</span>
+              </div>
+              <div className="text-[10px] text-gray-500 font-bold">
+                LAST {historyEntries.length} AIRINGS · NEWEST FIRST
+              </div>
+            </div>
+
+            {historyLoading ? (
+              <div className="flex-1 flex items-center justify-center text-xs text-gray-500">
+                <RefreshCw size={14} className="animate-spin mr-2 text-accent" />
+                Loading broadcast history...
+              </div>
+            ) : historyEntries.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-gray-600 space-y-2">
+                <Tv size={32} className="text-gray-700" />
+                <p className="text-xs">No broadcast history recorded yet.</p>
+                <p className="text-[10px] text-gray-600 text-center max-w-xs leading-relaxed">
+                  History is recorded after 60+ seconds of confirmed playback on the On Air monitor.
+                </p>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto pr-1 space-y-1.5">
+                {historyEntries.map((entry, idx) => {
+                  const posterUrl = entry.poster_path
+                    ? entry.poster_path.startsWith("http")
+                      ? entry.poster_path
+                      : convertFileSrc(entry.poster_path)
+                    : null;
+                  
+                  const airedDate = (() => {
+                    try {
+                      const d = new Date(entry.aired_at);
+                      return {
+                        date: d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
+                        time: d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false }),
+                      };
+                    } catch {
+                      return { date: "—", time: "—" };
+                    }
+                  })();
+
+                  const durationMin = Math.round(entry.duration_aired / 60);
+
+                  return (
+                    <div
+                      key={entry.id || idx}
+                      className="p-2.5 bg-gray-950/80 border border-gray-800/80 rounded-lg hover:border-accent/30 flex items-center space-x-3 transition-all group"
+                    >
+                      {/* Timeline dot */}
+                      <div className="flex flex-col items-center shrink-0 w-6">
+                        <div className="w-2 h-2 rounded-full bg-accent/70 group-hover:bg-accent transition-colors" />
+                        {idx < historyEntries.length - 1 && <div className="w-px flex-1 bg-gray-800 mt-1 h-4" />}
+                      </div>
+
+                      {/* Poster */}
+                      <div className="w-8 h-11 bg-gray-900 rounded overflow-hidden shrink-0 border border-gray-800">
+                        {posterUrl ? (
+                          <img src={posterUrl} alt={entry.title} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Film size={12} className="text-gray-600" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-bold text-gray-200 truncate group-hover:text-accent transition-colors">
+                          {entry.title}
+                        </div>
+                        <div className="flex items-center space-x-2 text-[9px] text-gray-500 mt-0.5">
+                          <span className="bg-gray-900 border border-gray-800 px-1 py-0.5 rounded uppercase font-bold text-[8px]">{entry.media_type}</span>
+                          {entry.year && <span>{entry.year}</span>}
+                          <span>•</span>
+                          <span className="text-cyan-500/70">{entry.channel_name}</span>
+                        </div>
+                      </div>
+
+                      {/* Timestamp + duration */}
+                      <div className="text-right shrink-0">
+                        <div className="text-[10px] font-bold text-gray-400">{airedDate.time}</div>
+                        <div className="text-[9px] text-gray-600">{airedDate.date}</div>
+                        {durationMin > 0 && (
+                          <div className="text-[8px] text-accent/70 mt-0.5">{durationMin}m aired</div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* GENRE HEATMAP TAB */}
+        {activeTab === "heatmap" && (
+          <div className="flex-1 bg-panel border border-gray-800 rounded-lg p-4 flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-800 shrink-0">
+              <div className="flex items-center space-x-2 text-xs font-bold text-gray-300">
+                <BarChart3 size={16} className="text-accent" />
+                <span>GENRE AFFINITY HEATMAP — AIRINGS BY DAY OF WEEK</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                {/* Legend */}
+                <div className="flex items-center space-x-1.5 text-[9px] text-gray-500">
+                  <span>FEWER</span>
+                  {[0.1, 0.3, 0.5, 0.7, 0.9].map(o => (
+                    <div key={o} className="w-4 h-4 rounded-sm border border-cyan-400/20"
+                      style={{ backgroundColor: `rgba(6,182,212,${o})` }} />
+                  ))}
+                  <span>MORE</span>
+                </div>
+                <button onClick={fetchHeatmap} disabled={heatmapLoading}
+                  className="bg-gray-800 hover:bg-gray-700 text-gray-200 font-bold text-xs rounded px-2 py-1 border border-gray-700 flex items-center space-x-1 transition-colors">
+                  <RefreshCw size={11} className={heatmapLoading ? "animate-spin" : ""} />
+                  <span>REFRESH</span>
+                </button>
+              </div>
+            </div>
+
+            {heatmapLoading ? (
+              <div className="flex-1 flex items-center justify-center text-xs text-gray-500">
+                <RefreshCw size={18} className="animate-spin mr-2 text-accent" />
+                Loading genre data...
+              </div>
+            ) : heatmapData.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-gray-600 space-y-2">
+                <BarChart3 size={36} className="text-gray-800" />
+                <p className="text-xs font-bold">NO PLAYBACK HISTORY YET</p>
+                <p className="text-[10px] text-gray-600 max-w-xs text-center leading-relaxed">
+                  Heatmap data builds as content airs. Start broadcasting and this chart will populate over time.
+                </p>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-auto">
+                {/* Day headers */}
+                <div className="grid gap-1 mb-2 sticky top-0 bg-panel z-10 pb-1"
+                  style={{ gridTemplateColumns: "180px repeat(7, 1fr) 60px" }}>
+                  <div className="text-[9px] text-gray-600 font-bold uppercase tracking-wider">GENRE</div>
+                  {["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"].map(d => (
+                    <div key={d} className="text-[9px] text-gray-500 font-bold text-center uppercase tracking-wider">{d}</div>
+                  ))}
+                  <div className="text-[9px] text-gray-500 font-bold text-center uppercase tracking-wider">TOTAL</div>
+                </div>
+
+                {/* Genre rows */}
+                {(() => {
+                  const maxVal = Math.max(1, ...heatmapData.flatMap(r =>
+                    [r.mon, r.tue, r.wed, r.thu, r.fri, r.sat, r.sun]
+                  ));
+                  const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+                  return heatmapData.map((row) => (
+                    <div key={row.genre} className="grid gap-1 mb-1 group"
+                      style={{ gridTemplateColumns: "180px repeat(7, 1fr) 60px" }}>
+                      <div className="text-[10px] text-gray-300 font-bold truncate flex items-center pr-2
+                        group-hover:text-accent transition-colors" title={row.genre}>
+                        {row.genre}
+                      </div>
+                      {days.map(day => {
+                        const val: number = row[day] || 0;
+                        const intensity = val === 0 ? 0 : 0.08 + (val / maxVal) * 0.82;
+                        return (
+                          <div key={day}
+                            className="relative h-8 rounded border border-cyan-400/10 flex items-center justify-center text-[9px] font-bold transition-all hover:border-accent/40"
+                            style={{ backgroundColor: val === 0 ? "rgba(17,24,39,0.5)" : `rgba(6,182,212,${intensity})` }}
+                            title={`${row.genre} · ${day.toUpperCase()}: ${val} airing${val !== 1 ? "s" : ""}`}>
+                            <span className={val === 0 ? "text-gray-700" : intensity > 0.5 ? "text-gray-900" : "text-cyan-200"}>
+                              {val === 0 ? "·" : val}
+                            </span>
+                          </div>
+                        );
+                      })}
+                      <div className="h-8 rounded border border-gray-700/50 flex items-center justify-center text-[10px] font-bold text-accent bg-accent/5">
+                        {row.total}
+                      </div>
+                    </div>
+                  ));
+                })()}
+
+                {/* Column totals */}
+                {heatmapData.length > 0 && (() => {
+                  const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+                  const totals = days.map(d => heatmapData.reduce((s, r) => s + (r[d] || 0), 0));
+                  const grand = totals.reduce((a, b) => a + b, 0);
+                  return (
+                    <div className="grid gap-1 mt-2 pt-2 border-t border-gray-800"
+                      style={{ gridTemplateColumns: "180px repeat(7, 1fr) 60px" }}>
+                      <div className="text-[9px] text-gray-500 font-bold uppercase tracking-wider flex items-center">TOTAL</div>
+                      {totals.map((t, i) => (
+                        <div key={i} className="h-7 rounded border border-gray-700 flex items-center justify-center text-[10px] font-bold text-gray-300 bg-gray-900/50">
+                          {t}
+                        </div>
+                      ))}
+                      <div className="h-7 rounded border border-accent/30 flex items-center justify-center text-[10px] font-bold text-accent bg-accent/5">
+                        {grand}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
 
       {/* FOOTER */}
       <div className="mt-3 pt-3 border-t border-gray-800 text-[10px] text-gray-500 flex justify-between shrink-0">

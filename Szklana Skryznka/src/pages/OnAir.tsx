@@ -1,10 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useChannelStore, ScheduleEntryDetails, SubtitleRecordInfo, AudioStreamInfo } from "../store";
 import { 
   Clock, Eye, AlertTriangle, StopCircle, RefreshCw, Globe, Subtitles, 
-  ChevronDown, Check, Tv, Calendar, Play, Volume2, VolumeX, Maximize2, Sparkles
+  ChevronDown, Check, Tv, Calendar, Play, Volume2, VolumeX, Maximize2, Sparkles,
+  Radio, Plus, Trash2
 } from "lucide-react";
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
+
 
 interface SubtitleCue {
   start: number;
@@ -47,12 +50,18 @@ function srtToVttBlobUrl(srtText: string): string {
 }
 
 export const OnAir: React.FC = () => {
-  const { playoutState, fetchPlayoutState, channels, fetchChannels } = useChannelStore();
+  const { playoutState, fetchPlayoutState, channels, fetchChannels, activeChannelId, setActiveChannelId, createChannel, deleteChannel } = useChannelStore();
   const [monitorActive, setMonitorActive] = useState(true);
   const [hlsSrc, setHlsSrc] = useState<string>("");
   const [directVideoFailed, setDirectVideoFailed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [showPlayerOverlay, setShowPlayerOverlay] = useState(false);
+  const [showChannelMenu, setShowChannelMenu] = useState(false);
+  const [showNewChannelForm, setShowNewChannelForm] = useState(false);
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelProfile, setNewChannelProfile] = useState("Mixed Family Channel");
+  const [channelActionLoading, setChannelActionLoading] = useState(false);
+
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsVideoRef = useRef<HTMLVideoElement>(null);
@@ -127,13 +136,49 @@ export const OnAir: React.FC = () => {
     fetchChannels();
   }, [fetchChannels]);
 
-  // Record movie play count on active entry change
+  // ── Play Count: 60-second confirmed-viewing threshold ─────────────────────
+  // We track the entry ID that started playing and only increment after 60s
+  // of the SAME entry remaining active. This prevents phantom counts from
+  // EPG poll refreshes or quick tab switches.
+  const playCountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRecordedEntryRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (activeEntry?.media_item_id) {
-      invoke("record_movie_played", { mediaItemId: activeEntry.media_item_id })
-        .catch(err => console.warn("Failed to record play count:", err));
+    // Cancel any pending timer from the previous entry
+    if (playCountTimerRef.current) {
+      clearTimeout(playCountTimerRef.current);
+      playCountTimerRef.current = null;
     }
-  }, [activeEntry?.media_item_id]);
+
+    const entryId = activeEntry?.media_item_id;
+    if (!entryId) return;
+    // Don't re-record the same session
+    if (lastRecordedEntryRef.current === entryId) return;
+
+    // Capture how long into the entry we are so we can compute elapsed duration
+    const entryStartMs = activeEntry?.start_time
+      ? new Date(activeEntry.start_time).getTime()
+      : Date.now();
+
+    playCountTimerRef.current = setTimeout(() => {
+      const elapsed = Math.round((Date.now() - entryStartMs) / 1000);
+      invoke("record_movie_played", {
+        mediaItemId: entryId,
+        channelId: activeChannelId,
+        durationAired: Math.max(elapsed, 60),
+      }).catch(err => console.warn("Failed to record play count:", err));
+      lastRecordedEntryRef.current = entryId;
+    }, 60_000); // 60 second confirmed-viewing threshold
+
+    return () => {
+      if (playCountTimerRef.current) {
+        clearTimeout(playCountTimerRef.current);
+        playCountTimerRef.current = null;
+      }
+    };
+  }, [activeEntry?.media_item_id, activeChannelId]);
+  // ─────────────────────────────────────────────────────────────────────────
+
 
   // Load coming programs for today (starting from 00:00:00 to 23:59:59)
   useEffect(() => {
@@ -146,7 +191,7 @@ export const OnAir: React.FC = () => {
         end.setHours(23, 59, 59, 999);
         const endIso = end.toISOString();
 
-        const channelId = channels[0]?.id || "chan_default";
+        const channelId = activeChannelId || channels[0]?.id || "chan_default";
         const fetched = await invoke<ScheduleEntryDetails[]>("get_schedule_entries", {
           channelId,
           startTimeIso: startIso,
@@ -163,7 +208,8 @@ export const OnAir: React.FC = () => {
     fetchComing();
     const interval = setInterval(fetchComing, 15000);
     return () => clearInterval(interval);
-  }, [channels, playoutState?.active_entry?.id]);
+  }, [channels, activeChannelId, playoutState?.active_entry?.id]);
+
 
   // Helper: build human-readable label for an audio stream
   const buildAudioLabel = (track: AudioStreamInfo): string => {
@@ -273,10 +319,23 @@ export const OnAir: React.FC = () => {
       setActiveCueText("");
       return;
     }
-    const adjustedTime = localProgress + (subOffsetMs / 1000);
-    const match = currentCues.find(c => adjustedTime >= c.start && adjustedTime <= c.end);
-    setActiveCueText(match ? match.text : "");
-  }, [localProgress, currentCues, subOffsetMs]);
+
+    const updateCue = () => {
+      let currentSec = localProgress;
+      if (videoRef.current && !videoRef.current.paused) {
+        currentSec = videoRef.current.currentTime;
+      } else if (activeEntry?.start_time) {
+        const startMs = new Date(activeEntry.start_time).getTime();
+        currentSec = Math.max(0, (Date.now() - startMs) / 1000);
+      }
+      const adjustedTime = currentSec + (subOffsetMs / 1000);
+      const match = currentCues.find(c => adjustedTime >= c.start && adjustedTime <= c.end);
+      setActiveCueText(match ? match.text : "");
+    };
+
+    const interval = setInterval(updateCue, 200);
+    return () => clearInterval(interval);
+  }, [localProgress, currentCues, subOffsetMs, activeEntry?.start_time]);
 
   // Handle audio track change: for direct playout use HTMLMediaElement API; for HLS restart transcode with new track
   const handleAudioTrackSelect = (track: AudioStreamInfo, newIdx: number) => {
@@ -307,6 +366,39 @@ export const OnAir: React.FC = () => {
         .catch((err) => console.error("Audio track switch transcode failed:", err));
     }
   };
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  useKeyboardShortcuts({
+    " ": useCallback((e) => {
+      e.preventDefault();
+      setIsMuted(m => !m);
+    }, []),
+    "s": useCallback(() => {
+      // Cycle to next subtitle track (or off)
+      if (subtitles.length === 0) return;
+      const opts = ["off", ...subtitles.map(s => s.id)];
+      const currentIdx = opts.indexOf(selectedSubtitleId);
+      const next = opts[(currentIdx + 1) % opts.length];
+      setSelectedSubtitleId(next);
+    }, [subtitles, selectedSubtitleId]),
+    "S": useCallback(() => {
+      if (subtitles.length === 0) return;
+      const opts = ["off", ...subtitles.map(s => s.id)];
+      const currentIdx = opts.indexOf(selectedSubtitleId);
+      const next = opts[(currentIdx + 1) % opts.length];
+      setSelectedSubtitleId(next);
+    }, [subtitles, selectedSubtitleId]),
+    "a": useCallback(() => {
+      if (availableAudioTracks.length < 2) return;
+      const nextIdx = (selectedAudioTrackIdx + 1) % availableAudioTracks.length;
+      handleAudioTrackSelect(availableAudioTracks[nextIdx], nextIdx);
+    }, [availableAudioTracks, selectedAudioTrackIdx, handleAudioTrackSelect]),
+    "A": useCallback(() => {
+      if (availableAudioTracks.length < 2) return;
+      const nextIdx = (selectedAudioTrackIdx + 1) % availableAudioTracks.length;
+      handleAudioTrackSelect(availableAudioTracks[nextIdx], nextIdx);
+    }, [availableAudioTracks, selectedAudioTrackIdx, handleAudioTrackSelect]),
+  });
 
   // Inspect item details for schedule line-up
   const inspectTarget = selectedInspectorItem || hoveredItem || activeEntry;
@@ -453,12 +545,108 @@ export const OnAir: React.FC = () => {
         <div className="flex items-center space-x-4">
           <div className="flex items-center space-x-2.5">
             <span className="w-2.5 h-2.5 rounded-full bg-onair animate-pulse shadow-[0_0_10px_rgba(249,115,22,0.8)]" />
-            <span className="text-sm font-black tracking-widest text-onair">ON AIR BROADCAST</span>
+            <span className="text-sm font-black tracking-widest text-onair">ON AIR</span>
           </div>
           <div className="h-4 w-px bg-gray-800" />
-          <span className="text-xs text-gray-400 font-bold tracking-wider">
-            {channels[0]?.name || "MAIN CHANNEL"}
-          </span>
+
+          {/* ── Channel Switcher ───────────────────────────────────── */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowChannelMenu(v => !v); setShowNewChannelForm(false); }}
+              className="flex items-center space-x-1.5 text-xs font-bold text-gray-200 bg-gray-900 border border-gray-700 hover:border-accent/50 hover:text-accent transition-all px-3 py-1.5 rounded tracking-wider"
+              title="Switch Channel"
+            >
+              <Radio size={13} className="text-accent" />
+              <span>{channels.find(c => c.id === activeChannelId)?.name || "MAIN CHANNEL"}</span>
+              <ChevronDown size={12} className={`transition-transform ${showChannelMenu ? "rotate-180" : ""}`} />
+            </button>
+
+            {showChannelMenu && (
+              <div className="absolute left-0 top-full mt-1 w-72 bg-gray-950 border border-gray-700 rounded-lg shadow-2xl z-50 overflow-hidden">
+                {/* Channel list */}
+                <div className="max-h-48 overflow-y-auto">
+                  {channels.map(ch => (
+                    <button
+                      key={ch.id}
+                      onClick={() => { setActiveChannelId(ch.id); setShowChannelMenu(false); }}
+                      className={`w-full flex items-center justify-between px-3 py-2.5 text-left text-xs font-mono hover:bg-gray-800 transition-colors ${activeChannelId === ch.id ? "text-accent bg-accent/5" : "text-gray-300"}`}
+                    >
+                      <span className="flex items-center space-x-2">
+                        {activeChannelId === ch.id && <Check size={11} className="text-accent" />}
+                        {activeChannelId !== ch.id && <span className="w-[11px]" />}
+                        <span>{ch.name}</span>
+                      </span>
+                      <span className="text-[9px] text-gray-600 font-bold">{ch.profile_name?.toUpperCase() || "MIXED"}</span>
+                      {ch.id !== "chan_default" && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteChannel(ch.id); }}
+                          className="ml-2 text-rose-500/60 hover:text-rose-400 transition-colors"
+                          title="Delete channel"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      )}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="border-t border-gray-800 p-2">
+                  {!showNewChannelForm ? (
+                    <button
+                      onClick={() => setShowNewChannelForm(true)}
+                      className="w-full flex items-center space-x-1.5 text-[10px] font-bold text-accent hover:bg-accent/10 px-2 py-1.5 rounded transition-colors"
+                    >
+                      <Plus size={12} />
+                      <span>NEW CHANNEL</span>
+                    </button>
+                  ) : (
+                    <div className="space-y-1.5 p-1">
+                      <input
+                        autoFocus
+                        type="text"
+                        placeholder="Channel name..."
+                        value={newChannelName}
+                        onChange={e => setNewChannelName(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[10px] text-accent font-mono focus:outline-none focus:border-accent"
+                      />
+                      <select
+                        value={newChannelProfile}
+                        onChange={e => setNewChannelProfile(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[10px] text-gray-300 font-mono focus:outline-none focus:border-accent"
+                      >
+                        {["Mixed Family Channel","Classic Movie Channel","Documentary Channel","Anime Channel","Educational Channel"].map(p => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                      <div className="flex space-x-1.5">
+                        <button
+                          onClick={() => { setShowNewChannelForm(false); setNewChannelName(""); }}
+                          className="flex-1 text-[9px] font-bold text-gray-500 hover:text-gray-300 py-1 rounded border border-gray-800 transition-colors"
+                        >CANCEL</button>
+                        <button
+                          disabled={!newChannelName.trim() || channelActionLoading}
+                          onClick={async () => {
+                            if (!newChannelName.trim()) return;
+                            setChannelActionLoading(true);
+                            try {
+                              await createChannel(newChannelName.trim(), newChannelProfile);
+                              setNewChannelName("");
+                              setShowNewChannelForm(false);
+                              setShowChannelMenu(false);
+                            } finally {
+                              setChannelActionLoading(false);
+                            }
+                          }}
+                          className="flex-1 text-[9px] font-bold text-background bg-accent hover:bg-cyan-400 py-1 rounded transition-colors disabled:opacity-50"
+                        >CREATE</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+          {/* ── End Channel Switcher ───────────────────────────────── */}
         </div>
 
         <div className="flex items-center space-x-4">
@@ -489,6 +677,7 @@ export const OnAir: React.FC = () => {
           </div>
         </div>
       </header>
+
 
       {/* MAIN STUDIO WORKSPACE */}
       <div className="flex-1 flex overflow-hidden">
@@ -780,7 +969,8 @@ export const OnAir: React.FC = () => {
                       setHlsSrc("");
                       invoke<string>("start_transcode", {
                         filePath: activeEntry.file_path,
-                        startTimeSec: targetSec
+                        startTimeSec: targetSec,
+                        audioTrackIndex: null,
                       })
                       .then(() => {
                         setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}`);

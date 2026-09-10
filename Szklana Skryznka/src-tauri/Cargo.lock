@@ -4405,6 +4405,7 @@ name = "szklana-skryznka"
 version = "0.8.0"
 dependencies = [
  "chrono",
+ "libc",
  "md5",
  "notify",
  "regex",

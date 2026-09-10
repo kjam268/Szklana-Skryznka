@@ -193,6 +193,9 @@ pub struct ScheduleEntryDetails {
     pub audio_tracks: Option<String>,
     pub audio_language: Option<String>,
     pub embedded_subtitles: Option<String>,
+    pub synopsis: Option<String>,
+    pub year: Option<i32>,
+    pub director: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

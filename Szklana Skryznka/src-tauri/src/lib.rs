@@ -768,6 +768,8 @@ pub fn run() {
                   handle.manage(commands::TranscoderState {
                       process: tokio::sync::Mutex::new(None),
                       current_file: tokio::sync::Mutex::new(None),
+                      playout_start_sec: std::sync::atomic::AtomicU64::new(0u64),
+                      process_group_id: std::sync::atomic::AtomicI32::new(0i32),
                       is_launching: std::sync::atomic::AtomicBool::new(false),
                   });
                   handle.manage(RecentHistory {
@@ -878,7 +880,26 @@ pub fn run() {
             commands::get_analysis_queue,
             commands::enqueue_media_analysis,
             commands::retry_failed_jobs,
-            commands::clear_completed_jobs
+            commands::clear_completed_jobs,
+            // Watchlist
+            commands::add_to_suggestion_watchlist,
+            commands::get_suggestion_watchlist,
+            commands::remove_from_suggestion_watchlist,
+            // Channel management
+            commands::create_channel,
+            commands::delete_channel,
+            // Playback history
+            commands::get_playback_history,
+            // Phase 2: Schedule Templates
+            commands::get_schedule_templates,
+            commands::create_schedule_template,
+            commands::delete_schedule_template,
+            // Phase 2: Watchlist → Schedule
+            commands::add_watchlist_item_to_schedule,
+            // Phase 2: Settings
+            commands::get_all_settings,
+            // Phase 3: Genre Heatmap
+            commands::get_genre_heatmap
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

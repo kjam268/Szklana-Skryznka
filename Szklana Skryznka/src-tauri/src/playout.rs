@@ -2,14 +2,17 @@ use sqlx::{SqlitePool, Row};
 use chrono::{DateTime, Utc};
 use crate::models::{PlayoutState, ScheduleEntryDetails, ScheduleEntry};
 
-/// Retrieves details for a specific schedule entry by its fields
 async fn fetch_entry_details(
     pool: &SqlitePool,
     entry: ScheduleEntry,
 ) -> Result<ScheduleEntryDetails, sqlx::Error> {
     let row = sqlx::query(
         "SELECT mi.title, mi.media_type, mi.runtime, mi.poster_path, mi.backdrop_path, \
-         mf.file_path, mf.audio_tracks, mf.audio_language, mf.embedded_subtitles \
+         mi.synopsis, mi.year, \
+         mf.file_path, mf.audio_tracks, mf.audio_language, mf.embedded_subtitles, \
+         (SELECT d.name FROM directors d \
+          JOIN media_directors md ON d.id = md.director_id \
+          WHERE md.media_item_id = mi.id LIMIT 1) AS director \
          FROM media_items mi \
          LEFT JOIN media_files mf ON mf.media_item_id = mi.id \
          WHERE mi.id = $1 LIMIT 1"
@@ -27,6 +30,9 @@ async fn fetch_entry_details(
     let audio_tracks: Option<String> = row.get("audio_tracks");
     let audio_language: Option<String> = row.get("audio_language");
     let embedded_subtitles: Option<String> = row.get("embedded_subtitles");
+    let synopsis: Option<String> = row.get("synopsis");
+    let year: Option<i32> = row.get("year");
+    let director: Option<String> = row.get("director");
 
     Ok(ScheduleEntryDetails {
         entry,
@@ -39,6 +45,9 @@ async fn fetch_entry_details(
         audio_tracks,
         audio_language,
         embedded_subtitles,
+        synopsis,
+        year,
+        director,
     })
 }
 
