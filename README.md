@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/YOUR_USERNAME/szklana-skrzynka/releases">
+  <a href="https://github.com/kjam268/szklana-skrzynka/releases">
     <img src="https://img.shields.io/badge/version-0.8.0-06b6d4?style=for-the-badge&logo=semanticrelease&logoColor=white" alt="Version" />
   </a>
   <a href="#">
