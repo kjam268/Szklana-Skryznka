@@ -861,6 +861,7 @@ pub fn run() {
             commands::get_smart_suggestions,
             commands::refresh_item_metadata,
             commands::open_app_window,
+            commands::get_player_url,
             commands::quit_app,
             commands::select_custom_poster,
             commands::search_opensubtitles,

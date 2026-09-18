@@ -4,7 +4,7 @@ import { useChannelStore, ScheduleEntryDetails, SubtitleRecordInfo, AudioStreamI
 import { 
   Clock, Eye, AlertTriangle, StopCircle, RefreshCw, Globe, Subtitles, 
   ChevronDown, Check, Tv, Calendar, Play, Volume2, VolumeX, Maximize2, Sparkles,
-  Radio, Plus, Trash2
+  Radio, Plus, Trash2, Copy, ExternalLink
 } from "lucide-react";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 
@@ -52,6 +52,22 @@ function srtToVttBlobUrl(srtText: string): string {
 export const OnAir: React.FC = () => {
   const { playoutState, fetchPlayoutState, channels, fetchChannels, activeChannelId, setActiveChannelId, createChannel, deleteChannel } = useChannelStore();
   const [monitorActive, setMonitorActive] = useState(true);
+  const [playerUrl, setPlayerUrl] = useState("http://127.0.0.1:8098/player");
+  const [urlCopied, setUrlCopied] = useState(false);
+
+  useEffect(() => {
+    invoke<string>("get_player_url").then(url => setPlayerUrl(url)).catch(() => {});
+  }, []);
+
+  const handleCopyPlayerUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(playerUrl);
+      setUrlCopied(true);
+      setTimeout(() => setUrlCopied(false), 2000);
+    } catch {
+      // fallback — open in browser via tauri opener
+    }
+  };
   const [hlsSrc, setHlsSrc] = useState<string>("");
   const [directVideoFailed, setDirectVideoFailed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -65,6 +81,8 @@ export const OnAir: React.FC = () => {
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsVideoRef = useRef<HTMLVideoElement>(null);
+  const hlsPlayoutStartRef = useRef<number>(0); // playout_position_ms/1000 at the moment we started the transcode
+  const monitorActiveRef = useRef<boolean>(true); // mirrors monitorActive for use in event handlers (avoids stale closures)
   const monitorContainerRef = useRef<HTMLDivElement>(null);
 
   const [hoveredItem, setHoveredItem] = useState<ScheduleEntryDetails | null>(null);
@@ -103,13 +121,8 @@ export const OnAir: React.FC = () => {
     return convertFileSrc(path);
   };
 
-  const getFallbackPosterUrl = (itemId: string) => {
-    let hash = 0;
-    for (let i = 0; i < itemId.length; i++) {
-      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const index = Math.abs(hash) % 37;
-    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
+  const getFallbackPosterUrl = (_itemId: string) => {
+    return "/no_poster42.png";
   };
 
   // Check if file is natively playable without transcode on macOS WebKit
@@ -313,7 +326,9 @@ export const OnAir: React.FC = () => {
       });
   }, [selectedSubtitleId, subtitles, activeEntry?.file_path]);
 
-  // Update active subtitle cue text on playback tick with offset calibration
+  // Update active subtitle cue text on playback tick
+  // Uses hlsVideoRef.currentTime + hlsPlayoutStartRef for HLS (file-relative position),
+  // or videoRef.currentTime for direct playout, so cues always match SRT timestamps.
   useEffect(() => {
     if (currentCues.length === 0) {
       setActiveCueText("");
@@ -321,12 +336,16 @@ export const OnAir: React.FC = () => {
     }
 
     const updateCue = () => {
-      let currentSec = localProgress;
-      if (videoRef.current && !videoRef.current.paused) {
+      let currentSec: number;
+      if (hlsVideoRef.current && !hlsVideoRef.current.paused && hlsVideoRef.current.readyState >= 2) {
+        // HLS playout: video.currentTime is relative to the transcode start;
+        // add the file offset we started from so it aligns with SRT timestamps.
+        currentSec = hlsVideoRef.current.currentTime + hlsPlayoutStartRef.current;
+      } else if (videoRef.current && !videoRef.current.paused) {
         currentSec = videoRef.current.currentTime;
-      } else if (activeEntry?.start_time) {
-        const startMs = new Date(activeEntry.start_time).getTime();
-        currentSec = Math.max(0, (Date.now() - startMs) / 1000);
+      } else {
+        // Fallback: wall-clock elapsed since programme start
+        currentSec = localProgress;
       }
       const adjustedTime = currentSec + (subOffsetMs / 1000);
       const match = currentCues.find(c => adjustedTime >= c.start && adjustedTime <= c.end);
@@ -335,7 +354,7 @@ export const OnAir: React.FC = () => {
 
     const interval = setInterval(updateCue, 200);
     return () => clearInterval(interval);
-  }, [localProgress, currentCues, subOffsetMs, activeEntry?.start_time]);
+  }, [localProgress, currentCues, subOffsetMs]);
 
   // Handle audio track change: for direct playout use HTMLMediaElement API; for HLS restart transcode with new track
   const handleAudioTrackSelect = (track: AudioStreamInfo, newIdx: number) => {
@@ -470,41 +489,64 @@ export const OnAir: React.FC = () => {
 
   const currentPlayingFileRef = useRef<string | null>(null);
 
-  // Playout management: Use direct playout for web-compatible or HLS for MKV/transcoded
+  // Playout management: start/stop transcode as the EPG active item changes.
+  // IMPORTANT: pausing the monitor (monitorActive=false) only freezes the local
+  // video element — it does NOT stop_transcode, so TV Client and Browser Player
+  // continue running from the same HLS stream.
   useEffect(() => {
     const activeFilePath = playoutState?.active_entry?.file_path;
     const shouldUseHls = (!isWebCompatible || directVideoFailed) && !isAudioOnly;
 
-    if (monitorActive && activeFilePath) {
-      if (shouldUseHls) {
-        if (currentPlayingFileRef.current === activeFilePath && hlsSrc) {
-          return;
-        }
-        currentPlayingFileRef.current = activeFilePath;
-        const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
-        invoke<string>("start_transcode", {
-          filePath: activeFilePath,
-          startTimeSec: targetSec,
-          audioTrackIndex: null,
-        })
-        .then(() => {
-          setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}`);
-        })
-        .catch((err) => {
-          console.warn("Transcoder launch failed:", err);
-          setHlsSrc("");
-        });
-      } else {
-        currentPlayingFileRef.current = null;
-        invoke("stop_transcode").catch(() => {});
-        setHlsSrc("");
+    if (activeFilePath && shouldUseHls) {
+      // Same file still running — don't restart
+      if (currentPlayingFileRef.current === activeFilePath && hlsSrc) {
+        return;
       }
-    } else if (!monitorActive) {
+      currentPlayingFileRef.current = activeFilePath;
+      const targetSec = playoutState?.playout_position_ms ? playoutState.playout_position_ms / 1000 : 0;
+      hlsPlayoutStartRef.current = targetSec;
+      invoke<string>("start_transcode", {
+        filePath: activeFilePath,
+        startTimeSec: targetSec,
+        audioTrackIndex: null,
+      })
+      .then(() => {
+        setHlsSrc(`http://127.0.0.1:8098/hls/stream.m3u8?t=${Date.now()}`);
+      })
+      .catch((err) => {
+        console.warn("Transcoder launch failed:", err);
+        setHlsSrc("");
+      });
+    } else if (activeFilePath && !shouldUseHls) {
+      // Direct playout for web-compatible files — stop any running transcode
+      currentPlayingFileRef.current = null;
+      invoke("stop_transcode").catch(() => {});
+      setHlsSrc("");
+    } else if (!activeFilePath) {
+      // Nothing scheduled — stop transcode
       currentPlayingFileRef.current = null;
       invoke("stop_transcode").catch(() => {});
       setHlsSrc("");
     }
-  }, [playoutState?.active_entry?.file_path, monitorActive, isWebCompatible, directVideoFailed, isAudioOnly]);
+    // NOTE: monitorActive is intentionally NOT in the dep array here.
+    // Pausing the monitor does not affect the shared transcode.
+  }, [playoutState?.active_entry?.file_path, isWebCompatible, directVideoFailed, isAudioOnly]);
+
+  // Keep monitorActiveRef in sync so event handlers always see the current value
+  useEffect(() => { monitorActiveRef.current = monitorActive; }, [monitorActive]);
+
+  // When the monitor is paused/resumed, only affect the local video element
+  useEffect(() => {
+    if (!monitorActive) {
+      // Pause local video elements without stopping the transcode
+      hlsVideoRef.current?.pause();
+      videoRef.current?.pause();
+    } else {
+      // Resume local video elements
+      hlsVideoRef.current?.play().catch(() => {});
+      videoRef.current?.play().catch(() => {});
+    }
+  }, [monitorActive]);
 
   // Synchronize direct video playout offset
   useEffect(() => {
@@ -659,6 +701,31 @@ export const OnAir: React.FC = () => {
             <Tv size={13} />
             <span>GO TO TV</span>
           </button>
+          {/* Browser Player Link */}
+          <div className="flex items-center rounded border border-gray-700 overflow-hidden text-xs font-bold">
+            <span className="px-2 py-1.5 text-[10px] text-gray-500 bg-gray-900 border-r border-gray-700 tracking-widest select-all" title={playerUrl}>
+              :8098/player
+            </span>
+            <button
+              onClick={handleCopyPlayerUrl}
+              className={`flex items-center space-x-1 px-2.5 py-1.5 transition-all ${
+                urlCopied ? "bg-emerald-600 text-white" : "bg-gray-900 text-gray-400 hover:text-accent hover:bg-gray-800"
+              }`}
+              title="Copy browser player link"
+            >
+              {urlCopied ? <Check size={11} /> : <Copy size={11} />}
+              <span>{urlCopied ? "COPIED" : "COPY"}</span>
+            </button>
+            <a
+              href={playerUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center space-x-1 px-2.5 py-1.5 bg-gray-900 text-gray-400 hover:text-accent hover:bg-gray-800 transition-all border-l border-gray-700"
+              title="Open in browser"
+            >
+              <ExternalLink size={11} />
+            </a>
+          </div>
           <button
             onClick={() => window.dispatchEvent(new CustomEvent("switch-tab", { detail: "grid" }))}
             className="flex items-center space-x-1.5 text-xs font-bold text-accent bg-accent/10 border border-accent/30 hover:bg-accent hover:text-black transition-all px-3 py-1.5 rounded tracking-wider cursor-pointer"
@@ -725,12 +792,16 @@ export const OnAir: React.FC = () => {
                         ref={hlsVideoRef}
                         src={hlsSrc}
                         className="w-full h-full object-contain"
-                        autoPlay
                         muted={isMuted}
                         playsInline
                         crossOrigin="anonymous"
                         onCanPlay={(e) => {
-                          (e.target as HTMLVideoElement).play().catch((err) => console.warn("HLS play error:", err));
+                          // Only auto-play if the monitor is active — prevents
+                          // audio restarting when a new EPG item loads while
+                          // the monitor is paused.
+                          if (monitorActiveRef.current) {
+                            (e.target as HTMLVideoElement).play().catch((err) => console.warn("HLS play error:", err));
+                          }
                         }}
                       />
                     ) : (

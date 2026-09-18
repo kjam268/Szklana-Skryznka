@@ -69,6 +69,7 @@ export const TvClient: React.FC = () => {
   const [availableAudioTracks, setAvailableAudioTracks] = useState<AudioStreamInfo[]>([]);
   const [selectedAudioTrackIdx, setSelectedAudioTrackIdx] = useState<number>(0);
   const [showAudioMenu, setShowAudioMenu] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
 
   // Sync EPG State periodically
   useEffect(() => {
@@ -142,14 +143,7 @@ export const TvClient: React.FC = () => {
     return convertFileSrc(path);
   };
 
-  const getFallbackPosterUrl = (itemId: string) => {
-    let hash = 0;
-    for (let i = 0; i < itemId.length; i++) {
-      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const index = Math.abs(hash) % 37;
-    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
-  };
+  const getFallbackPosterUrl = (_itemId: string) => "/no_poster42.png";
 
   const formatDuration = (seconds?: number) => {
     if (!seconds || seconds <= 0) return "";
@@ -465,7 +459,20 @@ export const TvClient: React.FC = () => {
 
           {/* TV CLIENT CONTROLS OVERLAY (Shown on mouse hover) */}
           <div className={`absolute top-4 right-4 flex items-center space-x-3 transition-opacity duration-300 z-30 font-mono ${showControls || showAudioMenu || showSubMenu ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
-            {/* Audio Track Selector */}
+            {/* Pause / Resume (local only — does not affect other streams) */}
+            <button
+              onClick={() => {
+                const vid = isWebCompatible ? videoRef.current : tvHlsVideoRef.current;
+                if (!vid) return;
+                if (isPaused) { vid.play().catch(() => {}); setIsPaused(false); }
+                else          { vid.pause(); setIsPaused(true); }
+              }}
+              className="flex items-center space-x-1.5 px-3 py-1.5 bg-black/80 hover:bg-black text-xs text-white border border-gray-700 hover:border-cyan-400 rounded-lg shadow-xl backdrop-blur-md transition-all"
+              title={isPaused ? "Resume" : "Pause (local only)"}
+            >
+              <span className="text-sm">{isPaused ? "▶" : "⏸"}</span>
+              <span className="font-bold">{isPaused ? "RESUME" : "PAUSE"}</span>
+            </button>
             <div className="relative">
               <button
                 onClick={() => { setShowAudioMenu(!showAudioMenu); setShowSubMenu(false); }}

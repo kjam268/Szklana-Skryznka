@@ -580,13 +580,8 @@ export const Library: React.FC = () => {
     return convertFileSrc(path);
   };
 
-  const getFallbackPosterUrl = (itemId: string) => {
-    let hash = 0;
-    for (let i = 0; i < itemId.length; i++) {
-      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const index = Math.abs(hash) % 37;
-    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
+  const getFallbackPosterUrl = (_itemId: string) => {
+    return "/no_poster42.png";
   };
 
   return (

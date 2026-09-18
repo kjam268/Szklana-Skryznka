@@ -18,6 +18,44 @@ extern crate libc;
 // Wrap the pool inside State
 pub type DbState<'a> = State<'a, SqlitePool>;
 
+// ── Global now-playing state (shared between Tauri commands and the HLS server thread) ──
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NowPlayingInfo {
+    pub title:      String,
+    pub media_type: String,
+    pub year:       Option<i32>,
+    pub director:   Option<String>,
+    pub synopsis:   Option<String>,
+    pub poster_url: Option<String>,   // HTTP URL reachable from the browser
+    pub duration:   i32,              // total seconds
+    pub position:   f64,              // playout_position_ms / 1000 at transcode start
+    pub next_title: Option<String>,
+    pub next_year:  Option<i32>,
+    pub started_at: f64,              // unix timestamp (seconds) when transcode started
+}
+
+static NOW_PLAYING: std::sync::OnceLock<std::sync::Mutex<Option<NowPlayingInfo>>> =
+    std::sync::OnceLock::new();
+
+fn now_playing_global() -> &'static std::sync::Mutex<Option<NowPlayingInfo>> {
+    NOW_PLAYING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn set_now_playing(info: Option<NowPlayingInfo>) {
+    if let Ok(mut guard) = now_playing_global().lock() {
+        *guard = info;
+    }
+}
+
+pub fn get_now_playing_json() -> String {
+    let guard = now_playing_global().lock().ok();
+    match guard.as_deref() {
+        Some(Some(info)) => serde_json::to_string(info).unwrap_or_else(|_| "{}".into()),
+        _ => r#"{"title":"Live Stream","media_type":"Broadcast","year":null,"director":null,"synopsis":null,"poster_url":null,"duration":0,"position":0,"next_title":null,"next_year":null,"started_at":0}"#.into(),
+    }
+}
+
+
 #[tauri::command]
 pub async fn scan_library(app: tauri::AppHandle, pool: DbState<'_>, path: String) -> Result<String, String> {
     info!("Tauri command scan_library invoked for path: {}", path);
@@ -1559,6 +1597,11 @@ pub async fn open_app_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn get_player_url() -> Result<String, String> {
+    Ok("http://127.0.0.1:8098/player".to_string())
+}
+
+#[tauri::command]
 pub async fn quit_app(app: tauri::AppHandle, state: State<'_, TranscoderState>) -> Result<(), String> {
     let mut lock = state.process.lock().await;
     if let Some(mut child) = lock.take() {
@@ -2057,8 +2100,11 @@ pub async fn start_transcode(
         "-ar".into(), "44100".into(),
         "-f".into(), "hls".into(),
         "-hls_time".into(), "4".into(),
-        "-hls_list_size".into(), "10".into(),
-        "-hls_flags".into(), "delete_segments+split_by_time".into(),
+        "-hls_list_size".into(), "20".into(),
+        // independent_segments: allows hls.js to start decoding from any segment
+        // No delete_segments: keeps segments on disk so the browser player can fetch them
+        // without a race condition between FFmpeg deleting and Chrome downloading.
+        "-hls_flags".into(), "split_by_time+independent_segments".into(),
         "-hls_segment_filename".into(), segment_path_pattern,
         m3u8_path_str,
     ]);
@@ -2142,6 +2188,47 @@ pub async fn start_transcode(
     }
 
     state.is_launching.store(false, Ordering::SeqCst);
+
+    // Write now-playing info to global so the HLS server can serve it
+    {
+        let pool = app_handle.state::<SqlitePool>();
+        let channel_id = "chan_default".to_string();
+        let now_info: Option<NowPlayingInfo> = match get_playout_state(&pool, &channel_id, Utc::now()).await {
+            Ok(ps) => {
+                if let Some(active) = &ps.active_entry {
+                    // Build a poster URL: if the poster_path is an absolute filesystem path,
+                    // map it via convertFileSrc equivalent — the browser can't access it directly.
+                    // We serve it as /api/poster?path=... from the HLS server.
+                    let poster_url = active.poster_path.as_ref().map(|p| {
+                        format!("http://127.0.0.1:8098/api/poster?path={}", urlencoding_simple(p))
+                    });
+                    let next_title = ps.next_entry.as_ref().map(|n| n.item_title.clone());
+                    let next_year  = ps.next_entry.as_ref().and_then(|n| n.year);
+                    Some(NowPlayingInfo {
+                        title:      active.item_title.clone(),
+                        media_type: active.media_type.clone(),
+                        year:       active.year,
+                        director:   active.director.clone(),
+                        synopsis:   active.synopsis.clone(),
+                        poster_url,
+                        duration:   active.duration,
+                        position:   start_time_sec,
+                        next_title,
+                        next_year,
+                        started_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0),
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+        set_now_playing(now_info);
+    }
+
     Ok(hls_url)
 }
 
@@ -2217,7 +2304,50 @@ pub fn cleanup_orphaned_ffmpeg() {
     }
 }
 
+/// Minimal percent-encode for filesystem paths in query strings (no external deps).
+fn urlencoding_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                out.push(byte as char);
+            }
+            other => {
+                out.push('%');
+                out.push(char::from_digit((other >> 4) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+                out.push(char::from_digit((other & 0xf) as u32, 16).unwrap_or('0').to_ascii_uppercase());
+            }
+        }
+    }
+    out
+}
 
+/// Minimal percent-decode for query-string values (no external deps).
+fn percent_decode_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                char::from(bytes[i + 1]).to_digit(16),
+                char::from(bytes[i + 2]).to_digit(16),
+            ) {
+                out.push(((hi << 4 | lo) as u8) as char);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
 
 pub fn start_hls_server(hls_dir: std::path::PathBuf) {
     use std::net::TcpListener;
@@ -2277,6 +2407,515 @@ pub fn start_hls_server(hls_dir: std::path::PathBuf) {
                 }
 
                 let is_head = method == "HEAD";
+
+                // Endpoint P: Browser Player Page
+                if path == "/player" || path == "/player/" {
+                    let html = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Szklana Skrzynka — Live</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --accent: #06b6d4; --bg: #09090f; --surface: #111118;
+      --border: #1f1f2e; --text: #e2e8f0; --muted: #6b7280;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+    #app { display: flex; flex-direction: column; height: 100%; }
+
+    /* TOP BAR */
+    #topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 20px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; }
+    .logo svg { width: 22px; height: 22px; }
+    .logo h1 { font-size: 15px; font-weight: 700; letter-spacing: .04em; color: var(--accent); }
+    .live-badge {
+      display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+      letter-spacing: .08em; color: #f87171;
+    }
+    .live-badge.on { color: #4ade80; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{ opacity:1; transform:scale(1); } 50%{ opacity:.4; transform:scale(.8); } }
+
+    /* VIDEO */
+    #video-wrap {
+      flex: 1; position: relative; background: #000; display: flex;
+      align-items: center; justify-content: center; overflow: hidden;
+    }
+    video { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+    /* CINEMATIC OVERLAY (hover) — mirrors TvClient style */
+    #overlay {
+      position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
+      opacity: 0; transition: opacity .4s; pointer-events: none;
+    }
+    #video-wrap:hover #overlay { opacity: 1; }
+    #overlay-grad {
+      position: absolute; inset: 0;
+      background: linear-gradient(to top, rgba(0,0,0,.92) 0%, rgba(0,0,0,.55) 50%, transparent 100%);
+    }
+    #overlay-content {
+      position: relative; z-index: 1; display: flex; align-items: flex-end; gap: 20px;
+      padding: 56px 28px 24px;
+    }
+    #ov-poster {
+      width: 72px; height: 100px; border-radius: 8px; overflow: hidden;
+      border: 1px solid rgba(255,255,255,.12); flex-shrink: 0;
+      background: var(--surface); display: none;
+    }
+    #ov-poster img { width: 100%; height: 100%; object-fit: cover; }
+    #ov-poster.visible { display: block; }
+    #ov-info { flex: 1; min-width: 0; }
+    #ov-title { font-size: 22px; font-weight: 800; line-height: 1.2; margin-bottom: 3px;
+                text-shadow: 0 2px 8px rgba(0,0,0,.8); }
+    #ov-dir   { font-size: 12px; color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+    #ov-synopsis { font-size: 11px; color: #d1d5db; line-height: 1.5; max-width: 600px;
+                   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                   overflow: hidden; margin-bottom: 6px; }
+    #ov-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+    .badge { font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+             padding: 2px 7px; border-radius: 4px; }
+    .badge-type { background: rgba(6,182,212,.15); color: #67e8f9; border: 1px solid rgba(6,182,212,.3); }
+    .badge-year { color: #6b7280; font-family: monospace; font-size: 10px; }
+    /* Progress bar */
+    #ov-progress { width: 100%; height: 3px; background: rgba(255,255,255,.15); border-radius: 2px; overflow: hidden; }
+    #ov-progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width 1s linear; }
+
+    /* CONTROLS */
+    #controls {
+      position: absolute; bottom: 0; left: 0; right: 0; z-index: 11;
+      display: flex; align-items: center; gap: 12px; padding: 8px 28px 20px;
+      opacity: 0; transition: opacity .3s; pointer-events: none;
+    }
+    #video-wrap:hover #controls { opacity: 1; pointer-events: all; }
+    #controls button {
+      background: rgba(255,255,255,.12); border: none; color: #fff;
+      border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: background .15s;
+    }
+    #controls button:hover { background: rgba(255,255,255,.22); }
+    #vol { -webkit-appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,.3); cursor: pointer; width: 80px; }
+    #vol::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+    #qlabel { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+    /* INFO BAR */
+    #infobar {
+      display: flex; align-items: center; gap: 16px; padding: 8px 20px;
+      background: var(--surface); border-top: 1px solid var(--border);
+      flex-shrink: 0; font-size: 12px;
+    }
+    #on-now { font-weight: 600; }
+    #next-up { color: var(--muted); }
+    #next-up span { color: var(--accent); }
+    #clock { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+    /* FULLSCREEN OVERLAY (covers entire screen while loading/waiting) */
+    #overlay-screen {
+      position: absolute; inset: 0; background: var(--bg);
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 18px; z-index: 20; text-align: center; padding: 24px;
+    }
+    #overlay-screen.hidden { display: none; }
+    .spinner { width: 44px; height: 44px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .85s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #status-icon { font-size: 36px; display: none; }
+    #status-icon.show { display: block; }
+    #status-title { font-size: 18px; font-weight: 700; }
+    #status-msg   { font-size: 13px; color: var(--muted); max-width: 380px; line-height: 1.6; }
+    #retry-btn {
+      display: none; margin-top: 4px; padding: 9px 22px;
+      background: var(--accent); color: #000; border: none; border-radius: 7px;
+      font-weight: 700; font-size: 13px; cursor: pointer;
+    }
+    #retry-btn.show { display: inline-block; }
+    #debug-detail { font-size: 10px; color: #374151; margin-top: 6px; font-family: monospace; }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>
+      </svg>
+      <h1>Szklana Skrzynka</h1>
+    </div>
+    <div class="live-badge" id="live-badge"><div class="dot"></div> OFFLINE</div>
+  </div>
+
+  <div id="video-wrap">
+    <!-- Full-screen state overlay (loading / waiting / error) -->
+    <div id="overlay-screen">
+      <div class="spinner" id="spinner"></div>
+      <div id="status-icon"></div>
+      <div id="status-title">Connecting…</div>
+      <div id="status-msg">Looking for the HLS stream on port 8098.</div>
+      <button id="retry-btn" onclick="manualRetry()">Try Again</button>
+      <div id="debug-detail"></div>
+    </div>
+
+    <video id="player" autoplay playsinline></video>
+
+    <div id="overlay">
+      <div id="overlay-grad"></div>
+      <div id="overlay-content">
+        <div id="ov-poster"><img id="ov-poster-img" src="" alt="" /></div>
+        <div id="ov-info">
+          <div id="ov-title">—</div>
+          <div id="ov-dir"></div>
+          <div id="ov-synopsis"></div>
+          <div id="ov-badges"></div>
+          <div id="ov-progress"><div id="ov-progress-bar"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="controls">
+      <button id="btn-mute" onclick="toggleMute()">🔊</button>
+      <input id="vol" type="range" min="0" max="1" step="0.02" value="1" oninput="setVol(this.value)" />
+      <button onclick="toggleFs()">⛶ Fullscreen</button>
+      <span id="qlabel">HLS</span>
+    </div>
+  </div>
+
+  <div id="infobar">
+    <span id="on-now">Waiting for programme info…</span>
+    <span id="next-up"></span>
+    <span id="clock"></span>
+  </div>
+</div>
+
+<script>
+  const STREAM  = 'http://127.0.0.1:8098/hls/stream.m3u8';
+  const API     = 'http://127.0.0.1:8098/api/now-playing';
+  const HLS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+
+  const video    = document.getElementById('player');
+  const spinner  = document.getElementById('spinner');
+  const icon     = document.getElementById('status-icon');
+  const title    = document.getElementById('status-title');
+  const msg      = document.getElementById('status-msg');
+  const retryBtn = document.getElementById('retry-btn');
+  const badge    = document.getElementById('live-badge');
+  const dbg      = document.getElementById('debug-detail');
+
+  let hls = null, retryTimer = null, retryCount = 0, playing = false;
+
+  /* ── State helpers ───────────────────────────────── */
+  function setState(state, detail) {
+    const os = document.getElementById('overlay-screen');
+    switch (state) {
+      case 'loading':
+        os.classList.remove('hidden');
+        spinner.style.display = 'block'; icon.className = '';
+        title.textContent = detail || 'Connecting…';
+        msg.textContent = 'Looking for the HLS stream on port 8098.';
+        retryBtn.className = ''; dbg.textContent = '';
+        setLive(false);
+        break;
+      case 'waiting':
+        os.classList.remove('hidden');
+        spinner.style.display = 'block'; icon.className = '';
+        title.textContent = 'Waiting for stream…';
+        msg.textContent = detail || 'The broadcast has not started yet. The player will connect automatically once a channel is started in the Szklana Skrzynka app.';
+        retryBtn.className = 'show'; dbg.textContent = '';
+        setLive(false);
+        break;
+      case 'live':
+        os.classList.add('hidden');
+        setLive(true);
+        playing = true;
+        break;
+      case 'error':
+        os.classList.remove('hidden');
+        spinner.style.display = 'none';
+        icon.textContent = '⚠️'; icon.className = 'show';
+        title.textContent = 'Cannot play this stream';
+        msg.textContent = detail || 'A media error occurred. Try a different quality preset (Standard or High) in the Szklana Skrzynka Settings.';
+        retryBtn.className = 'show'; dbg.textContent = '';
+        setLive(false);
+        break;
+    }
+  }
+
+  function setLive(on) {
+    badge.className = 'live-badge' + (on ? ' on' : '');
+    badge.querySelector('.dot').className = 'dot' + (on ? ' pulse' : '');
+    badge.childNodes[1].textContent = on ? ' LIVE' : ' OFFLINE';
+  }
+
+  function setDebug(text) { dbg.textContent = text; }
+
+  /* ── hls.js dynamic loader ───────────────────────── */
+  function loadHlsJs() {
+    if (typeof Hls !== 'undefined') return Promise.resolve(true);
+    return new Promise(resolve => {
+      const s = document.createElement('script');
+      s.src = HLS_CDN;
+      s.onload  = () => resolve(true);
+      s.onerror = () => { setDebug('CDN script failed to load'); resolve(false); };
+      document.head.appendChild(s);
+      setTimeout(() => resolve(typeof Hls !== 'undefined'), 10000);
+    });
+  }
+
+  /* ── Main init / retry ───────────────────────────── */
+  async function initPlayer() {
+    clearTimeout(retryTimer);
+    playing = false;
+    setState('loading');
+
+    const ok = await loadHlsJs();
+
+    if (ok && typeof Hls !== 'undefined' && Hls.isSupported()) {
+      startWithHlsJs();
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      startNative();
+    } else {
+      setState('error', 'hls.js failed to load from CDN and this browser does not support native HLS. Please use Chrome, Firefox, or Safari and ensure you have internet access.');
+    }
+  }
+
+  function startWithHlsJs() {
+    if (hls) { hls.destroy(); hls = null; }
+
+    hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: false,
+      backBufferLength: 30,
+      maxBufferLength: 60,
+      manifestLoadingTimeOut: 8000,
+      manifestLoadingMaxRetry: 0,   // We handle retries ourselves
+      levelLoadingTimeOut: 8000,
+      levelLoadingMaxRetry: 0,
+    });
+
+    hls.loadSource(STREAM);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      retryCount = 0;
+      setState('live');
+      video.play().catch(() => {});
+    });
+
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      console.warn('[hls]', d.type, d.details, d.fatal, d);
+      if (!d.fatal) return;
+
+      setDebug(d.type + ' / ' + d.details);
+
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        // Stream not ready yet — keep retrying with backoff
+        retryCount++;
+        const delay = Math.min(1500 * retryCount, 8000);
+        const secs  = (delay / 1000).toFixed(1);
+        setState('waiting', `Stream not detected — retrying in ${secs}s (attempt ${retryCount}).`);
+        retryTimer = setTimeout(() => {
+          if (!playing) {
+            // Reinitialise fully so hls.js reloads the manifest from scratch
+            initPlayer();
+          }
+        }, delay);
+      } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR && retryCount < 4) {
+        // Try built-in media recovery first
+        retryCount++;
+        setDebug('media error — attempting recovery ' + retryCount);
+        hls.recoverMediaError();
+      } else {
+        // Fatal non-recoverable: bad codec, DRM, etc.
+        setState('error', 'A fatal media error occurred. If you are using the Passthrough quality preset, try switching to Standard — some codecs (H.265, AV1) are not supported in all browsers.');
+      }
+    });
+
+    document.getElementById('qlabel').textContent = 'HLS · hls.js';
+  }
+
+  function startNative() {
+    video.src = STREAM;
+    video.addEventListener('loadedmetadata', () => {
+      retryCount = 0;
+      setState('live');
+      video.play().catch(() => {});
+    }, { once: true });
+    video.addEventListener('error', () => {
+      retryCount++;
+      const delay = Math.min(1500 * retryCount, 8000);
+      setState('waiting', `Stream not detected — retrying in ${(delay/1000).toFixed(1)}s.`);
+      retryTimer = setTimeout(() => initPlayer(), delay);
+    }, { once: true });
+    document.getElementById('qlabel').textContent = 'HLS · native';
+  }
+
+  function manualRetry() { retryCount = 0; initPlayer(); }
+
+  /* ── Controls ────────────────────────────────────── */
+  function toggleMute() {
+    video.muted = !video.muted;
+    document.getElementById('btn-mute').textContent = video.muted ? '🔇' : '🔊';
+  }
+  function setVol(v) {
+    video.volume = parseFloat(v);
+    video.muted = (parseFloat(v) === 0);
+    document.getElementById('btn-mute').textContent = parseFloat(v) === 0 ? '🔇' : '🔊';
+  }
+  function toggleFs() {
+    const el = document.getElementById('video-wrap');
+    if (!document.fullscreenElement && !document.webkitFullscreenElement)
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    else
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  }
+
+  /* ── Now-playing info ────────────────────────────── */
+  let nowPlaying = null;
+
+  async function fetchInfo() {
+    try {
+      const r = await fetch(API, { cache: 'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      nowPlaying = d;
+
+      // Title
+      document.getElementById('ov-title').textContent = d.title || '—';
+
+      // Director
+      const dirEl = document.getElementById('ov-dir');
+      dirEl.textContent = d.director ? 'Dir. ' + d.director : '';
+      dirEl.style.display = d.director ? '' : 'none';
+
+      // Synopsis
+      const synEl = document.getElementById('ov-synopsis');
+      synEl.textContent = (d.synopsis && d.synopsis !== 'Scanned local content') ? d.synopsis : '';
+      synEl.style.display = synEl.textContent ? '' : 'none';
+
+      // Badges
+      const badgesEl = document.getElementById('ov-badges');
+      badgesEl.innerHTML = [
+        d.media_type ? `<span class="badge badge-type">${d.media_type}</span>` : '',
+        d.year       ? `<span class="badge badge-year">${d.year}</span>` : '',
+      ].join('');
+
+      // Poster
+      const posterEl = document.getElementById('ov-poster');
+      const posterImg = document.getElementById('ov-poster-img');
+      if (d.poster_url) {
+        posterImg.src = d.poster_url;
+        posterImg.onload = () => posterEl.classList.add('visible');
+        posterImg.onerror = () => posterEl.classList.remove('visible');
+      } else {
+        posterEl.classList.remove('visible');
+      }
+
+      // Info bar
+      document.getElementById('on-now').textContent = '▶ ' + (d.title || 'Live broadcast');
+      document.getElementById('next-up').innerHTML  = d.next_title
+        ? 'Up next: <span>' + d.next_title + (d.next_year ? ' (' + d.next_year + ')' : '') + '</span>'
+        : '';
+    } catch {}
+  }
+
+  // Update progress bar every second from now-playing metadata
+  function updateProgress() {
+    if (!nowPlaying || !nowPlaying.duration || nowPlaying.duration <= 0) return;
+    const elapsed = (Date.now() / 1000) - nowPlaying.started_at + nowPlaying.position;
+    const pct = Math.min(100, Math.max(0, (elapsed / nowPlaying.duration) * 100));
+    document.getElementById('ov-progress-bar').style.width = pct.toFixed(2) + '%';
+  }
+
+  /* ── Clock ───────────────────────────────────────── */
+  function tick() {
+    document.getElementById('clock').textContent =
+      new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  initPlayer();
+  fetchInfo();
+  setInterval(fetchInfo, 30000);
+  setInterval(() => { tick(); updateProgress(); }, 1000);
+  tick();
+</script>
+</body>
+</html>"##;
+                    let bytes = html.as_bytes();
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Content-Type: text/html; charset=utf-8\r\n\
+                         Content-Length: {}\r\n\
+                         Cache-Control: no-cache\r\n\
+                         Connection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    if !is_head { let _ = stream.write_all(bytes); }
+                    return;
+                }
+
+                // Endpoint P2: /api/now-playing — returns current programme as JSON
+                if path == "/api/now-playing" {
+                    let json = get_now_playing_json();
+                    let bytes = json.as_bytes();
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         Cache-Control: no-cache\r\n\
+                         Connection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    if !is_head { let _ = stream.write_all(bytes); }
+                    return;
+                }
+
+                // Endpoint P3: /api/poster?path=<url-encoded-path> — serves poster images to browser
+                if path.starts_with("/api/poster") {
+                    // Decode the ?path= query parameter
+                    let file_path_opt = path.split('?').nth(1).and_then(|qs| {
+                        qs.split('&').find_map(|kv| {
+                            let mut parts = kv.splitn(2, '=');
+                            if parts.next() == Some("path") {
+                                parts.next().map(|v| percent_decode_simple(v))
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    match file_path_opt.and_then(|p| std::fs::read(&p).ok().map(|b| (p, b))) {
+                        Some((fp, bytes)) => {
+                            let mime = if fp.ends_with(".jpg") || fp.ends_with(".jpeg") { "image/jpeg" }
+                                else if fp.ends_with(".png") { "image/png" }
+                                else if fp.ends_with(".webp") { "image/webp" }
+                                else { "image/jpeg" };
+                            let headers = format!(
+                                "HTTP/1.1 200 OK\r\n\
+                                 Access-Control-Allow-Origin: *\r\n\
+                                 Content-Type: {}\r\n\
+                                 Content-Length: {}\r\n\
+                                 Cache-Control: public, max-age=3600\r\n\
+                                 Connection: close\r\n\r\n",
+                                mime, bytes.len()
+                            );
+                            let _ = stream.write_all(headers.as_bytes());
+                            if !is_head { let _ = stream.write_all(&bytes); }
+                        }
+                        None => {
+                            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                        }
+                    }
+                    return;
+                }
 
                 // Endpoint 0: HLS Manifest (.m3u8) Proxy with path cleanup
                 if path.ends_with(".m3u8") {

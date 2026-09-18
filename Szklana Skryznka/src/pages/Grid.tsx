@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film, Radio, Zap, Layout } from "lucide-react";
+import { Calendar, ChevronLeft, ChevronRight, Menu, Search, X, Film, Radio, Layout } from "lucide-react";
 import { useLibraryStore, useChannelStore, useNotificationStore, MediaItemDetails, useScheduleStore } from "../store";
 import { TemplatesPanel } from "../components/TemplatesPanel";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
@@ -25,9 +25,9 @@ export const Grid: React.FC = () => {
 
   const { items, fetchItems } = useLibraryStore();
   const { channels, fetchChannels, activeChannelId, setActiveChannelId } = useChannelStore();
-  const { selectedProfile, selectedPolicy } = useScheduleStore();
+  const { } = useScheduleStore();
   const showToast = useNotificationStore((state) => state.showToast);
-  const [isFilling, setIsFilling] = useState<string | null>(null); // day ISO being filled
+
 
 
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -56,7 +56,6 @@ export const Grid: React.FC = () => {
     return monday;
   });
 
-  const timeColumnRef = useRef<HTMLDivElement>(null);
   const gridCellsRef = useRef<HTMLDivElement>(null);
 
   const fetchSchedule = async () => {
@@ -72,31 +71,6 @@ export const Grid: React.FC = () => {
       setScheduleEntries(data);
     } catch (err) {
       console.error("Failed to fetch schedule entries:", err);
-    }
-  };
-
-  // Auto-fill gaps for a single day
-  const handleFillGapsForDay = async (day: Date) => {
-    const dayKey = day.toISOString().slice(0, 10);
-    setIsFilling(dayKey);
-    try {
-      const dayStart = new Date(day);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(day);
-      dayEnd.setHours(23, 59, 59, 999);
-      await invoke("start_channel", {
-        channelId,
-        profileName: selectedProfile,
-        startTimeIso: dayStart.toISOString(),
-        endTimeIso: dayEnd.toISOString(),
-        policy: selectedPolicy,
-      });
-      showToast(`Gaps filled for ${day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}`, "success");
-      fetchSchedule();
-    } catch (err) {
-      showToast(`Fill failed: ${err}`, "error");
-    } finally {
-      setIsFilling(null);
     }
   };
 
@@ -149,14 +123,11 @@ export const Grid: React.FC = () => {
         const targetScrollTop = Math.max(0, slotOffsetTop - viewportHeight / 2 + 32);
         
         gridCellsRef.current.scrollTop = targetScrollTop;
-        if (timeColumnRef.current) {
-          timeColumnRef.current.scrollTop = targetScrollTop;
-        }
       }
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [scheduleEntries.length]);
+  }, [scheduleEntries]);
 
   // Calculate 7 rolling days of the week starting from Monday (startOfWeek)
   const weekDays = Array.from({ length: 7 }, (_, i) => {
@@ -202,13 +173,8 @@ export const Grid: React.FC = () => {
     return convertFileSrc(path);
   };
 
-  const getFallbackPosterUrl = (itemId: string) => {
-    let hash = 0;
-    for (let i = 0; i < itemId.length; i++) {
-      hash = itemId.charCodeAt(i) + ((hash << 5) - hash);
-    }
-    const index = Math.abs(hash) % 37;
-    return index === 36 ? "/no_poster.png" : `/no_poster${index}.png`;
+  const getFallbackPosterUrl = (_itemId: string) => {
+    return "/no_poster42.png";
   };
 
   const getShowName = (title: string) => {
@@ -344,93 +310,21 @@ export const Grid: React.FC = () => {
         </div>
 
         {/* TIMELINE LIST CANVAS */}
-        <div className="flex-1 overflow-hidden mt-6 border border-gray-800 bg-gray-950 rounded-lg shadow-inner flex flex-row">
-          
-          {/* LEFT: STATIC TIME INDICATORS COLUMN (fixed horizontally, scrolls vertically with container) */}
-          <div 
-            ref={timeColumnRef}
-            className="w-20 shrink-0 flex flex-col bg-gray-950 border-r border-gray-800 select-none overflow-hidden"
-          >
-            {/* TIME Header Box */}
-            <div className="p-3 h-[43px] text-center text-[10px] text-gray-500 font-bold border-b border-gray-800 bg-gray-900 sticky top-0 z-30 flex items-center justify-center uppercase">
-              TIME
-            </div>
-            {/* TIME Slots list */}
-            {Array.from({ length: 48 }, (_, slotIdx) => {
-              const hourIdx = Math.floor(slotIdx / 2);
-              const isHalfHour = slotIdx % 2 === 1;
-              const hour = (7 + hourIdx) % 24;
-              const hourStr = hour.toString().padStart(2, "0") + (isHalfHour ? ":30" : ":00");
-              
-              let labelColor = "";
-              let labelText = "";
-              let timeBlockColor = "";
-              if (hour >= 7 && hour < 12) {
-                labelColor = "text-emerald-400";
-                labelText = "MORNING";
-                timeBlockColor = "bg-emerald-950/30 border-r border-emerald-800/40 border-b border-gray-900/50";
-              } else if (hour >= 12 && hour < 17) {
-                labelColor = "text-amber-400";
-                labelText = "AFTERNOON";
-                timeBlockColor = "bg-amber-950/30 border-r border-amber-800/40 border-b border-gray-900/50";
-              } else if (hour >= 17 && hour < 22) {
-                labelColor = "text-rose-400";
-                labelText = "EVENING";
-                timeBlockColor = "bg-rose-950/30 border-r border-rose-800/40 border-b border-gray-900/50";
-              } else {
-                labelColor = "text-indigo-400";
-                labelText = "NIGHT";
-                timeBlockColor = "bg-indigo-950/30 border-r border-indigo-900/40 border-b border-gray-900/50";
-              }
-
-              return (
-                <div key={slotIdx} className={`h-[64px] shrink-0 flex flex-col items-center justify-center space-y-0.5 ${timeBlockColor}`}>
-                  <span className="text-[11px] font-bold text-gray-200">{hourStr}</span>
-                  <span className={`text-[7px] font-bold tracking-widest ${labelColor}`}>{labelText}</span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* RIGHT: SCROLLABLE DAYS GRID */}
-          <div 
+        <div className="flex-1 overflow-hidden mt-6 border border-gray-800 bg-gray-950 rounded-lg shadow-inner">
+          <div
             ref={gridCellsRef}
-            onScroll={(e) => {
-              if (timeColumnRef.current) {
-                timeColumnRef.current.scrollTop = e.currentTarget.scrollTop;
-              }
-            }}
             onDragLeave={() => setDraggedOverCell(null)}
-            className="flex-1 overflow-auto scrollbar-thin"
+            className="w-full h-full overflow-auto scrollbar-thin"
           >
             <div className="min-w-[1250px] flex flex-col">
               {/* Header row — day columns with gap-fill button */}
               <div className="flex border-b border-gray-800 bg-gray-900/90 sticky top-0 z-30">
                 {weekDays.map((day, idx) => {
-                  // Count entries for this calendar day to detect gaps
-                  const dayStr = day.toISOString().slice(0, 10);
-                  const dayEntries = scheduleEntries.filter(e => e.start_time.slice(0, 10) === dayStr);
-                  const hasGaps = dayEntries.length === 0;
-                  const isFillingDay = isFilling === dayStr;
                   return (
                     <div key={idx} className="flex-1 p-2 text-center border-r border-gray-800 text-xs font-bold select-none">
-                      <div className={`${hasGaps ? "text-rose-400" : "text-accent"} leading-tight`}>
+                      <div className="text-accent leading-tight">
                         {day.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).toUpperCase()}
                       </div>
-                      {hasGaps && (
-                        <button
-                          onClick={() => handleFillGapsForDay(day)}
-                          disabled={!!isFilling}
-                          className="mt-0.5 flex items-center justify-center space-x-0.5 mx-auto text-[8px] font-bold text-rose-400 hover:text-accent hover:bg-accent/10 border border-rose-800/50 hover:border-accent/30 px-1.5 py-0.5 rounded transition-all disabled:opacity-50"
-                          title="Auto-fill empty day"
-                        >
-                          {isFillingDay ? (
-                            <span className="animate-pulse">FILLING...</span>
-                          ) : (
-                            <><Zap size={8} /><span>FILL GAPS</span></>
-                          )}
-                        </button>
-                      )}
                     </div>
                   );
                 })}
